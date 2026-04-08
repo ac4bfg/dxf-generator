@@ -1,0 +1,7 @@
+# Generated DXF files
+# These files are auto-generated and can be cleaned
+*.dxf
+*.zip
+__pycache__/
+*.pyc
+.env
