@@ -37,10 +37,10 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           timeout: 120s
           script: |
-            cd /opt/dxf-generator
+            cd /home/deploy/apps/dxf-generator
             
-            # Pull latest code as dxf-service user
-            sudo -u dxf-service git pull origin main
+            # Pull latest code as deploy user
+            sudo -u deploy git pull origin main
             
             # Install/update dependencies
             source venv/bin/activate
