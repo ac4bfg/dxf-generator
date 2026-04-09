@@ -148,7 +148,7 @@ class DxfService:
                     shutil.copy2(str(dxf_path_abs), os.path.join(input_dir, dxf_filename))
 
                     cmd = [
-                        "xvfb-run", "-a",
+                        "/usr/bin/xvfb-run", "-a",
                         self.oda_path,
                         input_dir,
                         output_dir,
@@ -162,7 +162,8 @@ class DxfService:
                         cmd,
                         capture_output=True,
                         text=True,
-                        timeout=120
+                        timeout=120,
+                        env={**os.environ, 'PATH': '/usr/bin:/bin:/usr/local/bin'}
                     )
 
                     if result.returncode != 0:
