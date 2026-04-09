@@ -8,29 +8,29 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      
+          python-version: "3.10"
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-      
+
       - name: Validate Python syntax
         run: |
           python -m py_compile app/main.py
           python -m py_compile app/config.py
           python -m py_compile app/routes/dxf.py
           python -m py_compile app/services/dxf_service.py
-      
+
       - name: Deploy to server
-        uses: appleboy/ssh-action@v0.1.10
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USERNAME }}
@@ -38,20 +38,20 @@ jobs:
           timeout: 120s
           script: |
             cd /home/deploy/apps/dxf-generator
-            
+
             # Pull latest code as deploy user
             sudo -u deploy git pull origin main
-            
+
             # Install/update dependencies
             source venv/bin/activate
             pip install -r requirements.txt
-            
+
             # Restart service
             sudo systemctl restart dxf-generator
             sleep 2
-            
+
             # Check status
             sudo systemctl status dxf-generator --no-pager
-            
+
             # Verify health endpoint
             curl -s http://localhost:8099/api/dxf/health || echo "Health check failed"
