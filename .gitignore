@@ -7,7 +7,7 @@ __pycache__/
 venv/
 ENV/
 env/
-.venv/
+.venv*/
 
 # IDE
 .vscode/
@@ -29,3 +29,4 @@ output/*.zip
 
 # Logs
 *.log
+*.deb

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Dict, Optional
+from typing import Dict, Optional, Literal
 
 
 class MaterialData(BaseModel):
@@ -22,6 +22,7 @@ class AsbuiltGenerateRequest(BaseModel):
     koordinat_tapping: str = Field(default="", description="Tapping coordinates (lat, lng)")
     materials: MaterialData = Field(default_factory=MaterialData)
     tanggal: Optional[str] = Field(default=None, description="Date string, auto-generated if not provided")
+    output_format: Literal["dxf", "dwg"] = Field(default="dwg", description="Output format: 'dxf' or 'dwg' (default: dwg)")
 
     class Config:
         json_schema_extra = {
@@ -41,14 +42,16 @@ class AsbuiltGenerateRequest(BaseModel):
                     "elbow": "1",
                     "pipa": "20.00",
                     "sealtape": "6"
-                }
+                },
+                "output_format": "dwg"
             }
         }
 
 
 class BulkGenerateRequest(BaseModel):
     items: list[AsbuiltGenerateRequest] = Field(..., description="List of asbuilt data to generate")
-    mode: str = Field(default="zip", description="Output mode: 'zip' for individual files, 'combined' for single merged DXF")
+    mode: str = Field(default="zip", description="Output mode: 'zip' for individual files")
+    output_format: Literal["dxf", "dwg"] = Field(default="dwg", description="Output format: 'dxf' or 'dwg' (default: dwg)")
 
 
 class GenerateResponse(BaseModel):
@@ -60,5 +63,7 @@ class GenerateResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    version: str = "1.0.0"
+    version: str = "1.1.0"
     template_found: bool
+    oda_available: bool = False
+    default_format: str = "dwg"

@@ -1,4 +1,9 @@
+import copy
 import os
+import platform
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +25,12 @@ class DxfService:
         "sealtape": "7"
     }
 
-    def __init__(self, template_path: str, output_path: str):
+    def __init__(self, template_path: str, output_path: str, oda_path: str = "/usr/bin/ODAFileConverter", dwg_version: str = "ACAD2018"):
         self.template_path = Path(template_path)
         self.output_path = Path(output_path)
         self.output_path.mkdir(parents=True, exist_ok=True)
+        self.oda_path = oda_path
+        self.dwg_version = dwg_version
 
     def generate_tanggal_indonesia(self) -> str:
         waktu_sekarang = datetime.now()
@@ -120,49 +127,129 @@ class DxfService:
         except Exception as e:
             return False, f"System error: {e}"
 
-    def generate_single(self, request_data: dict) -> tuple[bool, str, Optional[Path]]:
+    def convert_to_dwg(self, dxf_path: Path, delete_dxf: bool = True) -> tuple[bool, str, Optional[Path]]:
+        if platform.system() == "Windows":
+            return False, "DWG conversion not supported on Windows. Use WSL2 or Linux server.", None
+
+        if not os.path.exists(self.oda_path):
+            return False, f"ODA File Converter not found at {self.oda_path}", None
+
+        if not dxf_path.exists():
+            return False, f"DXF file not found: {dxf_path}", None
+
+        dxf_path_abs = dxf_path.resolve()
+        dxf_filename = dxf_path.name
+        dxf_basename = dxf_path.stem
+        expected_dwg = self.output_path / f"{dxf_basename}.dwg"
+
+        try:
+            with tempfile.TemporaryDirectory() as input_dir:
+                with tempfile.TemporaryDirectory() as output_dir:
+                    shutil.copy2(str(dxf_path_abs), os.path.join(input_dir, dxf_filename))
+
+                    cmd = [
+                        "xvfb-run", "-a",
+                        self.oda_path,
+                        input_dir,
+                        output_dir,
+                        self.dwg_version,
+                        "DWG",
+                        "0",
+                        "1"
+                    ]
+
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
+
+                    if result.returncode != 0:
+                        return False, f"ODA conversion failed: {result.stderr}", None
+
+                    temp_dwg_path = os.path.join(output_dir, f"{dxf_basename}.dwg")
+
+                    if not os.path.exists(temp_dwg_path):
+                        return False, f"DWG output not found: {temp_dwg_path}", None
+
+                    shutil.move(temp_dwg_path, str(expected_dwg))
+
+                    if delete_dxf and dxf_path.exists():
+                        dxf_path.unlink()
+
+                    return True, f"Converted to DWG -> {expected_dwg}", expected_dwg
+
+        except subprocess.TimeoutExpired:
+            return False, "ODA conversion timeout (120s)", None
+        except Exception as e:
+            return False, f"Conversion error: {e}", None
+
+    def generate_single(self, request_data: dict, output_format: str = "dwg") -> tuple[bool, str, Optional[Path]]:
         data = self.prepare_data(request_data)
         reff_id = request_data.get("reff_id", "unknown")
-        # Sanitasi nama file - ganti spasi dan karakter illegal dengan underscore
         safe_reff_id = reff_id.replace(' ', '_').replace('/', '_').replace('\\', '_')
-        output_filename = f"ASBUILT_{safe_reff_id}.dxf"
+        
+        dxf_filename = f"ASBUILT_{safe_reff_id}.dxf"
+        success, message = self.generate_from_template(data, dxf_filename)
 
-        success, message = self.generate_from_template(data, output_filename)
+        if not success:
+            return False, message, None
 
-        if success:
-            return True, message, self.output_path / output_filename
-        return False, message, None
+        dxf_path = self.output_path / dxf_filename
 
-    def generate_bulk_zip(self, items: list[dict]) -> tuple[bool, str, Optional[Path]]:
+        if output_format.lower() == "dwg":
+            dwg_success, dwg_message, dwg_path = self.convert_to_dwg(dxf_path, delete_dxf=True)
+            
+            if dwg_success:
+                return True, dwg_message, dwg_path
+            else:
+                if dxf_path.exists():
+                    dxf_path.unlink()
+                return False, dwg_message, None
+
+        return True, message, dxf_path
+
+    def generate_bulk_zip(self, items: list[dict], output_format: str = "dwg") -> tuple[bool, str, Optional[Path]]:
         if not items:
             return False, "No items provided", None
 
-        zip_filename = f"ASBUILT_BULK_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        extension = "dwg" if output_format.lower() == "dwg" else "dxf"
+        zip_filename = f"ASBUILT_BULK_{timestamp}.zip"
         zip_path = self.output_path / zip_filename
 
         try:
-            # Load template sekali saja di luar loop
             template_doc = ezdxf.readfile(str(self.template_path))
             
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for idx, item in enumerate(items):
                     data = self.prepare_data(item)
                     reff_id = item.get("reff_id", f"unknown_{idx}")
-                    # Sanitasi nama file
                     safe_reff_id = reff_id.replace(' ', '_').replace('/', '_').replace('\\', '_')
-                    temp_filename = f"ASBUILT_{safe_reff_id}.dxf"
-
-                    # Copy doc dari template yang sudah diload
-                    import copy
+                    
+                    dxf_filename = f"ASBUILT_{safe_reff_id}.dxf"
                     temp_doc = copy.deepcopy(template_doc)
                     
                     self.process_modelspace(temp_doc.modelspace(), data)
                     self.process_blocks(temp_doc, data)
 
-                    temp_output = self.output_path / temp_filename
-                    temp_doc.saveas(str(temp_output))
-                    zipf.write(temp_output, temp_filename)
-                    temp_output.unlink()
+                    temp_dxf = self.output_path / dxf_filename
+                    temp_doc.saveas(str(temp_dxf))
+
+                    if output_format.lower() == "dwg":
+                        success, msg, dwg_path = self.convert_to_dwg(temp_dxf, delete_dxf=True)
+                        if success and dwg_path:
+                            zipf.write(dwg_path, f"ASBUILT_{safe_reff_id}.dwg")
+                            if dwg_path.exists():
+                                dwg_path.unlink()
+                        else:
+                            if temp_dxf.exists():
+                                temp_dxf.unlink()
+                    else:
+                        zipf.write(temp_dxf, dxf_filename)
+                        if temp_dxf.exists():
+                            temp_dxf.unlink()
 
             return True, f"Created ZIP with {len(items)} files -> {zip_path}", zip_path
 

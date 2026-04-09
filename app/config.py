@@ -1,4 +1,6 @@
 import os
+import platform
+import shutil
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from functools import lru_cache
@@ -11,6 +13,10 @@ class Settings(BaseSettings):
     port: int = 8099
     debug: bool = False
     api_key: str = ""
+    oda_path: str = "/usr/bin/ODAFileConverter"
+    oda_enabled: bool = True
+    default_output_format: str = "dwg"
+    dwg_version: str = "ACAD2018"
 
     class Config:
         env_file = ".env"
@@ -32,3 +38,17 @@ def get_output_path() -> Path:
     output = Path(settings.output_path)
     output.mkdir(parents=True, exist_ok=True)
     return output
+
+
+def get_oda_path() -> str:
+    settings = get_settings()
+    if os.path.exists(settings.oda_path):
+        return settings.oda_path
+    return None
+
+
+def is_oda_available() -> bool:
+    settings = get_settings()
+    if platform.system() == "Windows":
+        return False
+    return os.path.exists(settings.oda_path)
