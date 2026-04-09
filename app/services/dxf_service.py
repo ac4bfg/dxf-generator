@@ -68,13 +68,14 @@ class DxfService:
         replaced = False
         if hasattr(entity, "dxf"):
             if hasattr(entity.dxf, "text"):
-                original_text = entity.dxf.text
-                if original_text and isinstance(original_text, str):
+                text = entity.dxf.text
+                if text and isinstance(text, str):
                     for key, value in data.items():
-                        if key in original_text:
-                            entity.dxf.text = original_text.replace(key, value)
+                        if key in text:
+                            text = text.replace(key, value)
                             replaced = True
-                            break
+                    if replaced:
+                        entity.dxf.text = text
         return replaced
 
     def process_modelspace(self, msp, data: dict) -> int:
