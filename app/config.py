@@ -8,6 +8,9 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     template_path: str = "templates/ASBUILT_SR.dxf"
+    isometric_template_path: str = "templates/SR_POLOS.dxf"
+    sk_isometric_template_path: str = "templates/SK_POLOS.dxf"
+    thumbnails_path: str = "thumbnails"
     output_path: str = "output"
     host: str = "0.0.0.0"
     port: int = 8099

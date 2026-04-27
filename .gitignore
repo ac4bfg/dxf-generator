@@ -30,3 +30,17 @@ output/*.zip
 # Logs
 *.log
 *.deb
+
+# Output files (temporary)
+output/*.dxf
+output/*.zip
+
+#template
+*.dxf
+*.dwg
+*.jpg
+*.png
+*.pdf
+*.bak
+*.ipynb
+test_engine.py

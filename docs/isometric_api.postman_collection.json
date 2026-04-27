@@ -1,0 +1,191 @@
+{
+  "info": {
+    "name": "DXF Isometric Engine API",
+    "description": "Test collection untuk endpoint /api/isometric (dynamic isometric drawing engine).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "base_url", "value": "http://localhost:8099", "type": "string"},
+    {"key": "api_key", "value": "", "type": "string"}
+  ],
+  "item": [
+    {
+      "name": "Health Check (legacy)",
+      "request": {
+        "method": "GET",
+        "url": {"raw": "{{base_url}}/api/dxf/health", "host": ["{{base_url}}"], "path": ["api", "dxf", "health"]}
+      }
+    },
+    {
+      "name": "List Blocks",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "x-api-key", "value": "{{api_key}}", "type": "text"}],
+        "url": {"raw": "{{base_url}}/api/isometric/blocks", "host": ["{{base_url}}"], "path": ["api", "isometric", "blocks"]}
+      }
+    },
+    {
+      "name": "Get Variants Info",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "x-api-key", "value": "{{api_key}}", "type": "text"}],
+        "url": {"raw": "{{base_url}}/api/isometric/variants", "host": ["{{base_url}}"], "path": ["api", "isometric", "variants"]}
+      }
+    },
+    {
+      "name": "Get Block Thumbnail",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "x-api-key", "value": "{{api_key}}", "type": "text"}],
+        "url": {
+          "raw": "{{base_url}}/api/isometric/thumbnail/klem_3-4",
+          "host": ["{{base_url}}"],
+          "path": ["api", "isometric", "thumbnail", "klem_3-4"]
+        }
+      }
+    },
+    {
+      "name": "Generate - Simple (2 pipes)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-BR\",\n  \"file_name\": \"simple_test\",\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 3000, \"dimension\": true}\n  ]\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/generate", "host": ["{{base_url}}"], "path": ["api", "isometric", "generate"]}
+      }
+    },
+    {
+      "name": "Generate - Full BR (canonical SR)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-BR\",\n  \"start_insert\": [209.52, 124.98],\n  \"file_name\": \"test_BR\",\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"component\", \"block\": \"klem_3-4\", \"color\": 5, \"gap\": 3.07},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 2000},\n    {\"type\": \"component\", \"block\": \"ball_valve_3-4\", \"color\": 5, \"gap\": 4.0},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"pipe\", \"direction\": \"right\", \"length_mm\": 250,\n     \"direction_by_variant\": {\"start-TR\": \"left\"},\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"}},\n    {\"type\": \"component\", \"block\": \"REGULATOR-2\", \"gap\": 0,\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"},\n     \"scale_by_variant\": {\"start-TL\": [1, 1]}},\n    {\"type\": \"pipe\", \"direction\": \"down\", \"length_mm\": 200},\n    {\"type\": \"component\", \"block\": \"meteran\", \"gap\": 0, \"scale\": [10, 10],\n     \"block_by_variant\": {\"start-BL\": \"meteran-BL\"},\n     \"scale_by_variant\": {\"start-BL\": [1, 1], \"start-TL\": [10, 10]}}\n  ],\n  \"combined_dims\": [{\"from_seg\": 1, \"to_seg\": 5}],\n  \"output_format\": \"dxf\"\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/generate", "host": ["{{base_url}}"], "path": ["api", "isometric", "generate"]}
+      }
+    },
+    {
+      "name": "Generate - Variant BL",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-BL\",\n  \"start_insert\": [209.52, 124.98],\n  \"file_name\": \"test_BL\",\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"component\", \"block\": \"klem_3-4\", \"color\": 5, \"gap\": 3.07},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 2000},\n    {\"type\": \"component\", \"block\": \"ball_valve_3-4\", \"color\": 5, \"gap\": 4.0},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"pipe\", \"direction\": \"right\", \"length_mm\": 250,\n     \"direction_by_variant\": {\"start-TR\": \"left\"},\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"}},\n    {\"type\": \"component\", \"block\": \"REGULATOR-2\", \"gap\": 0,\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"},\n     \"scale_by_variant\": {\"start-TL\": [1, 1]}},\n    {\"type\": \"pipe\", \"direction\": \"down\", \"length_mm\": 200},\n    {\"type\": \"component\", \"block\": \"meteran\", \"gap\": 0, \"scale\": [10, 10],\n     \"block_by_variant\": {\"start-BL\": \"meteran-BL\"},\n     \"scale_by_variant\": {\"start-BL\": [1, 1], \"start-TL\": [10, 10]}}\n  ],\n  \"combined_dims\": [{\"from_seg\": 1, \"to_seg\": 5}],\n  \"output_format\": \"dxf\"\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/generate", "host": ["{{base_url}}"], "path": ["api", "isometric", "generate"]}
+      }
+    },
+    {
+      "name": "Generate - Variant TR",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-TR\",\n  \"start_insert\": [209.52, 124.98],\n  \"file_name\": \"test_TR\",\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"component\", \"block\": \"klem_3-4\", \"color\": 5, \"gap\": 3.07},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 2000},\n    {\"type\": \"component\", \"block\": \"ball_valve_3-4\", \"color\": 5, \"gap\": 4.0},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"pipe\", \"direction\": \"right\", \"length_mm\": 250,\n     \"direction_by_variant\": {\"start-TR\": \"left\"},\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"}},\n    {\"type\": \"component\", \"block\": \"REGULATOR-2\", \"gap\": 0,\n     \"scale_by_variant\": {\"start-TL\": [1, 1]}},\n    {\"type\": \"pipe\", \"direction\": \"down\", \"length_mm\": 200},\n    {\"type\": \"component\", \"block\": \"meteran\", \"gap\": 0, \"scale\": [10, 10]}\n  ],\n  \"combined_dims\": [{\"from_seg\": 1, \"to_seg\": 5}],\n  \"output_format\": \"dxf\"\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/generate", "host": ["{{base_url}}"], "path": ["api", "isometric", "generate"]}
+      }
+    },
+    {
+      "name": "Generate - Variant TL",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-TL\",\n  \"start_insert\": [209.52, 124.98],\n  \"file_name\": \"test_TL\",\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"component\", \"block\": \"klem_3-4\", \"color\": 5, \"gap\": 3.07},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 2000},\n    {\"type\": \"component\", \"block\": \"ball_valve_3-4\", \"color\": 5, \"gap\": 4.0},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"pipe\", \"direction\": \"right\", \"length_mm\": 250,\n     \"direction_by_variant\": {\"start-TR\": \"left\"},\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"}},\n    {\"type\": \"component\", \"block\": \"REGULATOR-2\", \"gap\": 0,\n     \"scale_by_variant\": {\"start-TL\": [1, 1]}},\n    {\"type\": \"pipe\", \"direction\": \"down\", \"length_mm\": 200},\n    {\"type\": \"component\", \"block\": \"meteran\", \"gap\": 0, \"scale\": [10, 10],\n     \"scale_by_variant\": {\"start-TL\": [10, 10]}}\n  ],\n  \"combined_dims\": [{\"from_seg\": 1, \"to_seg\": 5}],\n  \"output_format\": \"dxf\"\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/generate", "host": ["{{base_url}}"], "path": ["api", "isometric", "generate"]}
+      }
+    },
+    {
+      "name": "Generate - Output DWG (Linux+ODA only)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-BR\",\n  \"file_name\": \"test_dwg_output\",\n  \"output_format\": \"dwg\",\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 3000, \"dimension\": true}\n  ]\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/generate", "host": ["{{base_url}}"], "path": ["api", "isometric", "generate"]}
+      }
+    },
+    {
+      "name": "Preview Blank SVG (template kosong)",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "x-api-key", "value": "{{api_key}}", "type": "text"}],
+        "url": {"raw": "{{base_url}}/api/isometric/preview-blank-svg", "host": ["{{base_url}}"], "path": ["api", "isometric", "preview-blank-svg"]}
+      },
+      "response": []
+    },
+    {
+      "name": "Preview SVG (template + customer data)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"reff_id\": \"044.10.01.22.0040\",\n  \"nama\": \"ISTANTO BUDI SANTOSO\",\n  \"alamat\": \"Perum Griya Harapan Desa Penyangkringan RT 03 RW 15\",\n  \"rt\": \"03\",\n  \"rw\": \"15\",\n  \"kelurahan\": \"044 - Nawangsari\",\n  \"sektor\": \"07\",\n  \"no_mgrt\": \"25110607153\",\n  \"sn_awal\": \"0.025\",\n  \"koordinat_tapping\": \"-6.9672, 110.0741\",\n  \"materials\": {\n    \"coupler\": \"1\",\n    \"elbow\": \"1\",\n    \"pipa\": \"20.00\",\n    \"sealtape\": \"6\"\n  }\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/preview-svg", "host": ["{{base_url}}"], "path": ["api", "isometric", "preview-svg"]}
+      },
+      "response": []
+    },
+    {
+      "name": "Preview Drawing SVG (template + pipeline + customer, live preview)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-api-key", "value": "{{api_key}}", "type": "text"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start_block\": \"start-BR\",\n  \"start_rotation\": 0,\n  \"segments\": [\n    {\"type\": \"pipe\", \"direction\": \"forward\", \"length_mm\": 5000, \"dimension\": true},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"component\", \"block\": \"klem_3-4\", \"color\": 5, \"gap\": 3.07},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 2000},\n    {\"type\": \"component\", \"block\": \"ball_valve_3-4\", \"color\": 5, \"gap\": 4.0},\n    {\"type\": \"pipe\", \"direction\": \"up\", \"length_mm\": 500},\n    {\"type\": \"pipe\", \"direction\": \"right\", \"length_mm\": 250,\n     \"direction_by_variant\": {\"start-TR\": \"left\"},\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"}},\n    {\"type\": \"component\", \"block\": \"REGULATOR-2\", \"gap\": 0,\n     \"bend_side_by_variant\": {\"start-BL\": \"right\"},\n     \"scale_by_variant\": {\"start-TL\": [1, 1]}},\n    {\"type\": \"pipe\", \"direction\": \"down\", \"length_mm\": 200},\n    {\"type\": \"component\", \"block\": \"meteran\", \"gap\": 0, \"scale\": [10, 10],\n     \"block_by_variant\": {\"start-BL\": \"meteran-BL\"},\n     \"scale_by_variant\": {\"start-BL\": [1, 1], \"start-TL\": [10, 10]}}\n  ],\n  \"combined_dims\": [{\"from_seg\": 1, \"to_seg\": 5}],\n  \"customer_data\": {\n    \"reff_id\": \"044.10.01.22.0040\",\n    \"nama\": \"ISTANTO BUDI SANTOSO\",\n    \"alamat\": \"Perum Griya Harapan Desa Penyangkringan RT 03 RW 15\",\n    \"rt\": \"03\",\n    \"rw\": \"15\",\n    \"kelurahan\": \"044 - Nawangsari\",\n    \"sektor\": \"07\",\n    \"no_mgrt\": \"25110607153\",\n    \"sn_awal\": \"0.025\",\n    \"koordinat_tapping\": \"-6.9672, 110.0741\",\n    \"materials\": {\n      \"coupler\": \"1\",\n      \"elbow\": \"1\",\n      \"pipa\": \"20.00\",\n      \"sealtape\": \"6\"\n    }\n  }\n}"
+        },
+        "url": {"raw": "{{base_url}}/api/isometric/preview-drawing-svg", "host": ["{{base_url}}"], "path": ["api", "isometric", "preview-drawing-svg"]}
+      },
+      "response": []
+    },
+    {
+      "name": "Download Generated File",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "x-api-key", "value": "{{api_key}}", "type": "text"}],
+        "url": {
+          "raw": "{{base_url}}/api/isometric/download/test_BR.dxf",
+          "host": ["{{base_url}}"],
+          "path": ["api", "isometric", "download", "test_BR.dxf"]
+        }
+      }
+    }
+  ]
+}

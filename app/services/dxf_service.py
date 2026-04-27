@@ -40,16 +40,14 @@ class DxfService:
         tanggal = request_data.get("tanggal") or self.generate_tanggal_indonesia()
 
         materials = request_data.get("materials", {})
-        if isinstance(materials, dict):
-            mat_coupler = materials.get("coupler", "0")
-            mat_elbow = materials.get("elbow", "0")
-            mat_pipa = materials.get("pipa", "0")
-            mat_sealtape = materials.get("sealtape", "0")
-        else:
-            mat_coupler = materials.get("19", "0")
-            mat_elbow = materials.get("10", "0")
-            mat_pipa = materials.get("8", "0")
-            mat_sealtape = materials.get("7", "0")
+        if not isinstance(materials, dict):
+            materials = {}
+
+        # Named SR keys (backward compat)
+        mat_coupler  = materials.get("coupler",  materials.get("19", "0"))
+        mat_elbow    = materials.get("elbow",    materials.get("10", "0"))
+        mat_pipa     = materials.get("pipa",     materials.get("8",  "0"))
+        mat_sealtape = materials.get("sealtape", materials.get("7",  "0"))
 
         data = {
             "[TANGGAL]": tanggal,
@@ -63,11 +61,21 @@ class DxfService:
             "[NO_MGRT]": request_data.get("no_mgrt", "-"),
             "[SN_AWAL]": request_data.get("sn_awal", "-"),
             "[KOORDINAT_TAPPING]": request_data.get("koordinat_tapping", "-"),
+            "[NO_SK]": str(request_data.get("no_sk", "-") or "-"),
+            # SR named material placeholders
             "[19]": str(mat_coupler),
             "[10]": str(mat_elbow),
             "[8]": str(mat_pipa),
             "[7]": str(mat_sealtape),
         }
+
+        # Dynamic: add [ID] replacement for every numeric key in materials dict.
+        # Covers both SR (keys "7","8","10","19") and SK (keys "1","2","3","5","6")
+        # without hardcoding per-module IDs here.
+        for mat_id, qty in materials.items():
+            placeholder = f"[{mat_id}]"
+            if placeholder not in data:
+                data[placeholder] = str(qty) if qty is not None else "0"
 
         return data
 
