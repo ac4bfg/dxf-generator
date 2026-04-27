@@ -172,7 +172,9 @@ class IsometricService:
             in_dir = str(dxf_path.parent)
             out_dir = str(dwg_path.parent)
             cmd = [self.oda_path, in_dir, out_dir, self.dwg_version, "DWG", "0", "1", dxf_path.name]
-            result = subprocess.run(cmd, capture_output=True, timeout=60)
+            env = os.environ.copy()
+            env.setdefault("DISPLAY", ":99")
+            result = subprocess.run(cmd, capture_output=True, timeout=60, env=env)
             return result.returncode == 0 and dwg_path.exists()
         except Exception:
             return False

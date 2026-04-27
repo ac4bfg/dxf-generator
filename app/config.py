@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     port: int = 8099
     debug: bool = False
     api_key: str = ""
-    oda_path: str = "/usr/bin/ODAFileConverter"
+    oda_path: str = "/usr/bin/ODAFileConverter_27.1.0.0/ODAFileConverter"
     oda_enabled: bool = True
     default_output_format: str = "dwg"
     dwg_version: str = "ACAD2018"
