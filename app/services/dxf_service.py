@@ -83,16 +83,26 @@ class DxfService:
 
     def replace_text_in_entity(self, entity, data: dict) -> bool:
         replaced = False
-        if hasattr(entity, "dxf"):
-            if hasattr(entity.dxf, "text"):
-                text = entity.dxf.text
-                if text and isinstance(text, str):
-                    for key, value in data.items():
-                        if key in text:
-                            text = text.replace(key, value)
-                            replaced = True
-                    if replaced:
-                        entity.dxf.text = text
+        if entity.dxftype() == 'MTEXT':
+            # MTEXT stores content in entity.text, not entity.dxf.text
+            text = entity.text or ''
+            if text:
+                new_text = text
+                for key, value in data.items():
+                    if key in new_text:
+                        new_text = new_text.replace(key, value)
+                        replaced = True
+                if replaced:
+                    entity.text = new_text
+        elif hasattr(entity, "dxf") and hasattr(entity.dxf, "text"):
+            text = entity.dxf.text
+            if text and isinstance(text, str):
+                for key, value in data.items():
+                    if key in text:
+                        text = text.replace(key, value)
+                        replaced = True
+                if replaced:
+                    entity.dxf.text = text
         return replaced
 
     def process_modelspace(self, msp, data: dict) -> int:
