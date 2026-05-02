@@ -1,6 +1,20 @@
 import os
 import sys
+import warnings
+from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Suppress noisy font-table warnings emitted by fonttools when ezdxf
+# parses TrueType fonts with minor 'name' table offset mismatches.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*'name' table stringOffset incorrect.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"fontTools.*",
+)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,12 +27,35 @@ from app.routes.dxf import router as dxf_router
 from app.routes.isometric import router as isometric_router
 
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Configure fonts and apply ezdxf patches once at server startup.
+
+    Without this, the first PDF/SVG request pays the full font-scan cost.
+    Subsequent requests hit the module-level caches in pdf_renderer and
+    dxf_to_svg and return immediately.
+    """
+    settings = get_settings()
+    try:
+        from app.services.pdf_renderer import _apply_ezdxf_patches, configure_ezdxf_fonts
+        _apply_ezdxf_patches()
+        font_dir = Path(getattr(settings, 'pdf_fonts_dir', '') or '')
+        if not font_dir.is_dir():
+            font_dir = Path('testing/autocad_fonts')
+        if font_dir.is_dir():
+            configure_ezdxf_fonts(font_dir)
+    except Exception:
+        pass  # non-fatal: fonts will be configured on first request as fallback
+    yield  # server runs here
+
+
 app = FastAPI(
     title="DXF Generator API",
     description="Microservice for generating DXF asbuilt documents for Service Regulator (SR)",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

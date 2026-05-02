@@ -32,8 +32,7 @@ output/*.zip
 *.deb
 
 # Output files (temporary)
-output/*.dxf
-output/*.zip
+output/*
 
 #template
 *.dxf
@@ -44,3 +43,6 @@ output/*.zip
 *.bak
 *.ipynb
 test_engine.py
+testing/*
+templates/*.dwl
+templates/*.dwl2

@@ -7,6 +7,7 @@ class MaterialData(BaseModel):
     elbow: str = Field(default="0", description="Material ID 10 - Elbow 90° x 20mm")
     pipa: str = Field(default="0", description="Material ID 8 - Pipa PE 20mm (m)")
     sealtape: str = Field(default="0", description="Material ID 7 - Seal Tape")
+    casing: str = Field(default="0", description="Material ID 21 - Casing 1 inch (m)")
 
 
 class AsbuiltGenerateRequest(BaseModel):

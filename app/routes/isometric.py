@@ -23,6 +23,15 @@ import ezdxf
 router = APIRouter(prefix="/api/isometric", tags=["Isometric Engine"])
 
 
+def _resolve_font_dir(settings) -> Path:
+    """Return the font directory to use for SVG/PDF rendering."""
+    configured = Path(getattr(settings, "pdf_fonts_dir", "") or "")
+    if configured and configured.is_dir():
+        return configured
+    fallback = Path("testing/autocad_fonts")
+    return fallback if fallback.is_dir() else configured
+
+
 def verify_api_key(x_api_key: Optional[str] = Header(None)) -> bool:
     settings = get_settings()
     if settings.api_key:
@@ -98,7 +107,11 @@ async def get_thumbnail(block_name: str, module: str = "SR", x_api_key: Optional
     path = service.get_thumbnail_path(block_name)
     if not path:
         raise HTTPException(status_code=404, detail=f"Thumbnail not found for: {block_name}")
-    return FileResponse(path=str(path), media_type="image/jpeg")
+    return FileResponse(
+        path=str(path),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @router.get("/variants", response_model=VariantDirectionsResponse)
@@ -136,7 +149,8 @@ async def preview_svg(
         dxf_svc.process_modelspace(doc.modelspace(), replacements)
         dxf_svc.process_blocks(doc, replacements)
 
-        svg = render_dxf_to_svg(doc)
+        _font_dir = _resolve_font_dir(settings)
+        svg = render_dxf_to_svg(doc, font_dir=_font_dir)
         return Response(content=svg, media_type="image/svg+xml")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview error: {str(e)}")
@@ -154,10 +168,171 @@ async def preview_drawing_svg(
     module = payload.get("module", "SR")
     service = get_isometric_service(module=module)
     customer_data = payload.pop("customer_data", None)
-    success, result = service.engine.generate_svg_preview(payload, customer_data)
+    success, result = service.engine.generate_svg_preview(
+        payload, customer_data, font_dir=service._pdf_font_dir()
+    )
     if not success:
         raise HTTPException(status_code=500, detail=result)
     return Response(content=result, media_type="image/svg+xml")
+
+
+@router.post("/preview-drawing-pdf")
+async def preview_drawing_pdf(
+    payload: dict = Body(..., description="Drawing config + optional customer_data"),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Live preview as PDF: generate drawing in-memory + text replace +
+    render PDF with the production renderer (font config, faux-bold, color
+    preservation, OLE overlays). Use this when the consumer wants the
+    print-quality output instead of the lightweight SVG preview.
+
+    Same payload shape as /preview-drawing-svg.
+    """
+    verify_api_key(x_api_key)
+    module = payload.get("module", "SR")
+    service = get_isometric_service(module=module)
+    customer_data = payload.pop("customer_data", None)
+
+    # Generate the drawing in-memory using the same engine the SVG preview
+    # uses; then route through the production PDF renderer.
+    try:
+        # Fast path: skeleton-cache + per-customer text overlay. Falls
+        # through to the full ezdxf renderer on any failure.
+        try:
+            pdf_bytes = service.render_pdf_bytes_cached(payload, customer_data)
+        except Exception:
+            engine_req = {**payload, "customer_data": customer_data} if customer_data is not None else payload
+            success, msg, doc = service.engine.generate(engine_req, None)
+            if not success:
+                raise HTTPException(status_code=500, detail=msg)
+            service._apply_text_replacement(doc, customer_data)
+            pdf_bytes = service.render_pdf_bytes(doc)
+            # Crossing is stripped from skeleton by filter; apply overlay when
+            # customer has casing OR segments originally had a crossing entry.
+            need_crossing = service._customer_has_casing(customer_data) or any(
+                s.get("type") == "crossing" for s in payload.get("segments", [])
+            )
+            if need_crossing:
+                pdf_bytes = service.apply_crossing_overlay(
+                    pdf_bytes, payload.get("start_block", "start-BR"), customer_data
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF preview error: {e}")
+    return Response(content=pdf_bytes, media_type="application/pdf")
+
+
+# ---------------------------------------------------------------------------
+# Drawing Cache Management
+# ---------------------------------------------------------------------------
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+@router.get("/pdf-cache-status")
+async def pdf_cache_status(
+    module: str = "SR",
+    x_api_key: Optional[str] = Header(None),
+):
+    """Return skeleton-cache stats for the given module (entry count, disk usage, last built)."""
+    verify_api_key(x_api_key)
+    service   = get_isometric_service(module=module)
+    cache_dir = service.output_dir / "pdf_cache"
+
+    if not cache_dir.exists():
+        return {"module": module, "entries": 0, "size_bytes": 0,
+                "size_human": "0 B", "last_built": None}
+
+    pdf_files  = list(cache_dir.glob("*.pdf"))
+    meta_files = list(cache_dir.glob("*.meta.json"))
+    total_size = sum(f.stat().st_size for f in pdf_files)
+    last_mtime = max((f.stat().st_mtime for f in pdf_files), default=0.0)
+
+    from datetime import datetime
+    return {
+        "module":      module,
+        "entries":     len(meta_files),
+        "size_bytes":  total_size,
+        "size_human":  _human_size(int(total_size)),
+        "last_built":  datetime.fromtimestamp(last_mtime).strftime("%Y-%m-%d %H:%M") if last_mtime else None,
+    }
+
+
+@router.post("/pdf-cache/warm")
+async def warm_pdf_cache(
+    payload: dict = Body(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Pre-build skeleton PDF caches for the supplied drawing configs.
+
+    Body: ``{"module": "SR", "payloads": [{start_block, segments, ...}, ...]}``.
+    Skips entries that already have a cached skeleton.
+
+    Returns ``{total, built, already_cached, failed, errors}``.
+    """
+    verify_api_key(x_api_key)
+    module   = payload.get("module", "SR")
+    payloads = payload.get("payloads", [])
+    service  = get_isometric_service(module=module)
+
+    from app.services.pdf_template_cache import request_cache_key, load_cache
+    cache_dir = service.output_dir / "pdf_cache"
+    built = already = failed = 0
+    errors: list = []
+
+    for item in payloads:
+        try:
+            key = request_cache_key(
+                service.template_path,
+                item.get("start_block", "start-BR"),
+                item.get("segments", []),
+                item.get("combined_dims", []),
+            )
+            if load_cache(cache_dir, key) is not None:
+                already += 1
+                continue
+            service.render_pdf_bytes_cached(item, customer_data=None)
+            built += 1
+        except Exception as exc:
+            failed += 1
+            errors.append(str(exc)[:120])
+
+    return {"total": len(payloads), "built": built,
+            "already_cached": already, "failed": failed, "errors": errors}
+
+
+@router.post("/pdf-cache/clear")
+async def clear_pdf_cache(
+    payload: dict = Body(default={}),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Delete all cached skeleton PDFs for the given module.
+
+    Body: ``{"module": "SR"}``  (defaults to SR).
+    Returns ``{deleted, module}``.
+    """
+    verify_api_key(x_api_key)
+    module    = payload.get("module", "SR")
+    service   = get_isometric_service(module=module)
+    cache_dir = service.output_dir / "pdf_cache"
+
+    deleted = 0
+    if cache_dir.exists():
+        for f in cache_dir.iterdir():
+            if f.suffix in (".pdf", ".json"):
+                try:
+                    f.unlink()
+                    deleted += 1
+                except Exception:
+                    pass
+
+    return {"deleted": deleted, "module": module}
 
 
 @router.get("/preview-blank-svg")
@@ -182,7 +357,7 @@ async def preview_blank_svg(
             "[TANGGAL]": "-", "[REFF_ID]": "-", "[NAMA]": "-", "[ALAMAT]": "-",
             "[RT]": "-", "[RW]": "-", "[KELURAHAN]": "-", "[SEKTOR]": "-",
             "[NO_MGRT]": "-", "[SN_AWAL]": "-", "[KOORDINAT_TAPPING]": "-",
-            "[19]": "0", "[10]": "0", "[8]": "0", "[7]": "0",
+            "[19]": "0", "[10]": "0", "[8]": "0", "[7]": "0", "[21]": "0",
         }
 
     try:
@@ -196,7 +371,7 @@ async def preview_blank_svg(
         dxf_svc.process_modelspace(doc.modelspace(), blank_replacements)
         dxf_svc.process_blocks(doc, blank_replacements)
 
-        svg = render_dxf_to_svg(doc)
+        svg = render_dxf_to_svg(doc, font_dir=_resolve_font_dir(settings))
         return Response(content=svg, media_type="image/svg+xml")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview error: {str(e)}")

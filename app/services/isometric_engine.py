@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 VARIANT_DIRECTIONS = {
     "start-BR": {"forward": 150, "back": 330, "right": 30, "left": 210, "up": 90, "down": 270},
     "start-BL": {"forward": 30, "back": 210, "right": 330, "left": 150, "up": 90, "down": 270},
-    "start-TR": {"forward": 210, "back": 30, "right": 330, "left": 150, "up": 90, "down": 270},
-    "start-TL": {"forward": 330, "back": 150, "right": 30, "left": 210, "up": 90, "down": 270},
+    "start-TR": {"forward": 210, "back": 30, "right": 150, "left": 330, "up": 90, "down": 270},
+    "start-TL": {"forward": 330, "back": 150, "right": 210, "left": 30, "up": 90, "down": 270},
     # SK: no isometric variant, uses standard orthogonal directions
     "sk": {"forward": 90, "back": 270, "right": 0, "left": 180, "up": 90, "down": 270},
 }
@@ -33,10 +33,33 @@ VARIANT_START_INSERT = {
     "sk": (150.0, 150.0),
 }
 
+# Block crossing per start variant — ditampilkan saat casing > 0
+CROSSING_BLOCK_MAP = {
+    "start-BR": "crossing-BR",
+    "start-BL": "crossing-BL",
+    "start-TR": "crossing-TR",
+    "start-TL": "crossing-TL",
+}
+
+# Placeholder insert positions — sesuaikan setelah layout dikonfirmasi
+CROSSING_INSERT_DEFAULT = {
+    "start-BR": (215, 170),
+    "start-BL": (210, 160),
+    "start-TR": (230, 130),
+    "start-TL": (170, 140),
+}
+
 _BASE_DIM_MAP = {
     30: (30, 90), 210: (30, 90),
     150: (330, 270), 330: (330, 270),
     90: (90, 210), 270: (90, 210),
+}
+
+# Orthogonal dim map for SK module (non-isometric axes).
+# Extension lines run perpendicular to the pipe (standard CAD convention).
+_BASE_DIM_MAP_SK = {
+    0: (0, 90),   180: (0, 90),   # horizontal pipe → extension vertical
+    90: (90, 0),  270: (90, 0),   # vertical pipe   → extension horizontal
 }
 
 STYLE_CYAN = {"layer": "0", "color": 4, "lineweight": 50, "ltscale": 0.5}
@@ -49,9 +72,25 @@ DIM_OVERRIDES = {
 
 BASE_BEND_RADIUS = 1.4
 
-# Maximum visual pipe length (mm) — pipes longer than this are drawn clamped
-# with a breakline symbol. Dimension text still shows the real length.
-MAX_VISUAL_LENGTH_MM = 2500
+# Auto-variant selection untuk smart blocks.
+# Key: nama block "virtual" yang dipakai di segment.
+# Value: dict {angle -> nama block asli di DXF template}.
+# Angle adalah arah pipa dalam derajat (sudah di-resolve oleh _resolve_pipe_angle).
+# UP variant = untuk jalur DOWN (270°), karena entry dari atas → exit ke bawah.
+# DOWN variant = untuk jalur UP (90°), karena entry dari bawah → exit ke atas.
+_BALL_VALVE_1_2_MAP: Dict[int, str] = {
+    270: "ball_valve_1-2_up",     # jalur ke bawah
+    90:  "ball_valve_1-2_down",   # jalur ke atas
+    330: "ball_valve_1-2_BR",     # jalur back  (start-BR)
+    150: "ball_valve_1-2_TL",     # jalur forward (start-BR)
+    30:  "ball_valve_1-2_TR",     # jalur right (start-BR)
+    210: "ball_valve_1-2_BL",     # jalur left  (start-BR)
+}
+
+SMART_BLOCK_VARIANTS: Dict[str, Dict[int, str]] = {
+    "ball_valve_1-2": _BALL_VALVE_1_2_MAP,
+    "valve": _BALL_VALVE_1_2_MAP,   # alias lama, otomatis resolve ke variant yang tepat
+}
 
 
 def draw_breakline(msp, midpoint, angle_deg, style):
@@ -287,10 +326,12 @@ def calc_bend(cursor, from_angle, to_angle, radius, bend_side=None, real_from=No
     return (cursor[0], cursor[1]), 0, 0, cursor
 
 
-def fix_oblique_geometry(doc, dim_entity, p1, p2, base, dim_angle_deg, oblique_deg):
-    geom_block = doc.blocks.get(dim_entity.dxf.geometry)
-    if not geom_block:
-        return
+def _compute_dim_geometry(dim_entity, p1, p2, base, dim_angle_deg, oblique_deg, geom_block):
+    """Compute isometric dim geometry and harvest styling from ezdxf-rendered block.
+
+    Returns a dict with all data needed to draw the dimension directly to MSP.
+    Does NOT modify the geometry block.
+    """
     dim_rad = math.radians(dim_angle_deg)
     ext_rad = math.radians(oblique_deg)
     cos_ext, sin_ext = math.cos(ext_rad), math.sin(ext_rad)
@@ -306,45 +347,83 @@ def fix_oblique_geometry(doc, dim_entity, p1, p2, base, dim_angle_deg, oblique_d
 
     arrow1 = intersect(p1[0], p1[1])
     arrow2 = intersect(p2[0], p2[1])
-    lines = [e for e in geom_block if e.dxftype() == 'LINE']
-    inserts = [e for e in geom_block if e.dxftype() == 'INSERT']
-    ext_lines, dim_lines = [], []
-    for line in lines:
-        sx, sy = line.dxf.start.x, line.dxf.start.y
-        d1 = math.sqrt((sx - p1[0])**2 + (sy - p1[1])**2)
-        d2 = math.sqrt((sx - p2[0])**2 + (sy - p2[1])**2)
-        (ext_lines if d1 < 3 or d2 < 3 else dim_lines).append(line)
-    for el in ext_lines:
-        sx, sy = el.dxf.start.x, el.dxf.start.y
-        d1 = math.sqrt((sx - p1[0])**2 + (sy - p1[1])**2)
-        d2 = math.sqrt((sx - p2[0])**2 + (sy - p2[1])**2)
-        if d1 < d2:
-            el.dxf.start = (p1[0] + d1 * cos_ext, p1[1] + d1 * sin_ext, 0)
-            el.dxf.end = (arrow1[0], arrow1[1], 0)
-        else:
-            el.dxf.start = (p2[0] + d2 * cos_ext, p2[1] + d2 * sin_ext, 0)
-            el.dxf.end = (arrow2[0], arrow2[1], 0)
-    if len(dim_lines) >= 2:
-        mt = [e for e in geom_block if e.dxftype() == 'MTEXT']
-        tc = (mt[0].dxf.insert.x, mt[0].dxf.insert.y) if mt \
-            else ((arrow1[0] + arrow2[0]) / 2, (arrow1[1] + arrow2[1]) / 2)
-        total = math.sqrt((arrow2[0] - arrow1[0])**2 + (arrow2[1] - arrow1[1])**2)
-        orig = sum(math.sqrt((d.dxf.end.x - d.dxf.start.x)**2 + (d.dxf.end.y - d.dxf.start.y)**2) for d in dim_lines)
-        hg = max(total - orig, 2.0) / 2
-        dv = ((arrow2[0] - arrow1[0]) / total, (arrow2[1] - arrow1[1]) / total) if total > 0 else (cos_dim, sin_dim)
-        gs = (tc[0] - hg * dv[0], tc[1] - hg * dv[1])
-        ge = (tc[0] + hg * dv[0], tc[1] + hg * dv[1])
-        for dl in dim_lines:
-            mx = (dl.dxf.start.x + dl.dxf.end.x) / 2
-            my = (dl.dxf.start.y + dl.dxf.end.y) / 2
-            if math.sqrt((mx - arrow1[0])**2 + (my - arrow1[1])**2) < math.sqrt((mx - arrow2[0])**2 + (my - arrow2[1])**2):
-                dl.dxf.start = (arrow1[0], arrow1[1], 0); dl.dxf.end = (gs[0], gs[1], 0)
-            else:
-                dl.dxf.start = (arrow2[0], arrow2[1], 0); dl.dxf.end = (ge[0], ge[1], 0)
-    for ins in inserts:
-        d1 = math.sqrt((ins.dxf.insert.x - p1[0])**2 + (ins.dxf.insert.y - p1[1])**2)
-        d2 = math.sqrt((ins.dxf.insert.x - p2[0])**2 + (ins.dxf.insert.y - p2[1])**2)
-        ins.dxf.insert = (arrow1[0], arrow1[1], 0) if d1 < d2 else (arrow2[0], arrow2[1], 0)
+    tc = ((arrow1[0] + arrow2[0]) / 2, (arrow1[1] + arrow2[1]) / 2)
+
+    # Harvest styling from ezdxf-rendered entities (read-only).
+    line_attribs = {}
+    insert_block_name = None
+    insert_attribs = {}
+    mtext_props = {}
+
+    if geom_block:
+        for e in geom_block:
+            t = e.dxftype()
+            if t == 'LINE' and not line_attribs:
+                for attr in ('layer', 'color', 'lineweight'):
+                    if e.dxf.hasattr(attr):
+                        line_attribs[attr] = e.dxf.get(attr)
+            elif t == 'INSERT' and insert_block_name is None:
+                insert_block_name = e.dxf.name
+                for attr in ('layer', 'color', 'xscale', 'yscale'):
+                    if e.dxf.hasattr(attr):
+                        insert_attribs[attr] = e.dxf.get(attr)
+            elif t == 'MTEXT' and not mtext_props:
+                for attr in ('layer', 'color', 'char_height', 'rotation', 'style'):
+                    if e.dxf.hasattr(attr):
+                        mtext_props[attr] = e.dxf.get(attr)
+
+    return {
+        'arrow1': arrow1, 'arrow2': arrow2, 'tc': tc,
+        'cos_ext': cos_ext, 'sin_ext': sin_ext,
+        'cos_dim': cos_dim, 'sin_dim': sin_dim,
+        'line_attribs': line_attribs,
+        'insert_block_name': insert_block_name,
+        'insert_attribs': insert_attribs,
+        'mtext_props': mtext_props,
+    }
+
+
+# Per-character width ratios measured from AutoCAD textbox() on 10-char repeated
+# strings, divided by 10. This correctly accounts for oblique-overlap: single-char
+# textbox overestimates per-char width because the oblique offset (H·tan θ) is
+# counted once per string, not once per character. Dividing a 10-char measurement
+# by 10 averages it correctly.
+# Measured with style height=10, then divided by 100 (10 chars × height 10).
+_CHAR_W_BY_STYLE: dict = {
+    'ISO 30': {
+        '0': 0.7684, '1': 0.7434, '2': 0.7837, '3': 0.7837, '4': 0.7623,
+        '5': 0.7799, '6': 0.7705, '7': 0.7815, '8': 0.7771, '9': 0.7705,
+        '.': 0.0762,
+    },
+    'ISO-30': {
+        '0': 0.7684, '1': 0.7515, '2': 0.7837, '3': 0.7771, '4': 0.7434,
+        '5': 0.7771, '6': 0.7667, '7': 0.7587, '8': 0.7771, '9': 0.7667,
+        '.': 0.0762,
+    },
+}
+
+
+def _estimate_text_width(text: str, char_height: float,
+                         text_style: str = 'ISO 30') -> float:
+    """Return estimated text width in DXF units for the given text style.
+
+    Uses per-character widths from 10-char string measurements (divided by 10),
+    which correctly accounts for oblique-overlap between characters. All digit
+    widths cluster in the 0.74–0.78 range, so gaps are consistent regardless
+    of which digits appear in the dimension text.
+    """
+    table = _CHAR_W_BY_STYLE.get(text_style, _CHAR_W_BY_STYLE['ISO 30'])
+    default_w = 0.77  # average across all measured digits
+    return sum(table.get(c, default_w) for c in text) * char_height
+
+
+# Keep old name as thin wrapper so call sites don't break.
+def fix_oblique_geometry(doc, dim_entity, p1, p2, base, dim_angle_deg, oblique_deg,
+                         dim_text=""):
+    geom_block = doc.blocks.get(dim_entity.dxf.geometry)
+    data = _compute_dim_geometry(dim_entity, p1, p2, base,
+                                 dim_angle_deg, oblique_deg, geom_block)
+    return data['tc'], data['mtext_props']
 
 
 def _clean_mtext(raw: str) -> str:
@@ -370,12 +449,7 @@ def explode_dimension(doc, msp, dim_entity):
                     attribs[attr] = entity.dxf.get(attr)
             msp.add_line(entity.dxf.start, entity.dxf.end, dxfattribs=attribs)
         elif etype == 'MTEXT':
-            attribs = {}
-            for attr in ['layer', 'color', 'char_height', 'rotation', 'attachment_point', 'style', 'width']:
-                if entity.dxf.hasattr(attr):
-                    attribs[attr] = entity.dxf.get(attr)
-            attribs['insert'] = entity.dxf.insert
-            msp.add_mtext(entity.dxf.text, dxfattribs=attribs)
+            pass  # MTEXT written directly to MSP by _auto_dimension
         elif etype == 'INSERT':
             attribs = {}
             for attr in ['layer', 'color', 'xscale', 'yscale', 'zscale', 'rotation', 'lineweight']:
@@ -418,99 +492,238 @@ class IsometricEngine:
         return angle_dim_map
 
     def _auto_dimension(self, doc, msp, p1, p2, line_angle, length_mm,
-                        start_block, angle_dim_map, dim_offset=6.0, do_explode=True,
+                        start_block, angle_dim_map, dim_offset=6.0,
                         side="default", start_rotation=0):
-        if line_angle not in angle_dim_map:
+        line_angle_key = round(line_angle) % 360
+        if line_angle_key not in angle_dim_map:
             return None
-        dim_angle, oblique_deg = angle_dim_map[line_angle]
+        dim_angle, oblique_deg = angle_dim_map[line_angle_key]
 
-        # Compute lateral (right/left) isometric directions for this pipe angle.
         # Isometric 3 axes: X=30°, Y=150°, Z=90° (plus rotation offset).
-        # Pipe on X-axis → lateral = Y-axis (330°/150°)
-        # Pipe on Y-axis → lateral = X-axis (30°/210°)
-        # Pipe on Z-axis → lateral = X-axis (30°/210°)
+        # Lateral directions for each pipe axis:
+        #   Pipe on X (30/210) → lateral = Y (330/150)
+        #   Pipe on Y (150/330) or Z (90/270) → lateral = X (30/210)
         r = start_rotation
         base_la = round((line_angle - r) % 360)
-        if base_la in (30, 210):
-            _right_obl = (330 + r) % 360
-            _left_obl  = (150 + r) % 360
-        else:  # 150/330 (Y-axis) and 90/270 (Z-axis) both use X-axis laterals
-            _right_obl = (30 + r) % 360
-            _left_obl  = (210 + r) % 360
 
-        # For vertical pipes (Z-axis), top/bottom 90°/270° obliques would be parallel
-        # to the pipe → dim merges with pipe line. Use Y-iso axis instead (330°/150°).
-        if base_la in (90, 270):
-            _top_obl = (330 + r) % 360
-            _bottom_obl = (150 + r) % 360
-        else:
-            _top_obl = 90.0
+        is_sk_orthogonal = start_block not in (
+            "start-BR", "start-BL", "start-TR", "start-TL"
+        )
+
+        if is_sk_orthogonal:
+            # SK / orthogonal: laterals are simply perpendicular to the pipe
+            _right_obl = (line_angle_key + 90) % 360
+            _left_obl  = (line_angle_key + 270) % 360
+            _top_obl   = 90.0
             _bottom_obl = 270.0
+        else:
+            if base_la in (30, 210):
+                _right_obl = (330 + r) % 360
+                _left_obl  = (150 + r) % 360
+            else:
+                _right_obl = (30 + r) % 360
+                _left_obl  = (210 + r) % 360
 
-        # Resolve oblique and dimstyle based on side value.
-        # Explicit positions (top/bottom/right/left) bypass variant adjustments.
-        # Relative positions (default/opposite) apply variant adjustments.
+            # "Reverse" isometric directions walk in the opposite sense, so
+            # right/left obliques are mirrored:
+            #   back  (330°): walking at 330°, right hand → 240° ≈ 210° (not 30°)
+            #   left  (210°): walking at 210°, right hand → 120° ≈ 150° (not 330°)
+            #   down  (270°): walking at 270°, right hand → 180° ≈ 210° (not 30°)
+            if base_la in (210, 330, 270):
+                _right_obl, _left_obl = _left_obl, _right_obl
+
+            # For vertical isometric pipes, avoid top/bottom parallel to pipe
+            if base_la in (90, 270):
+                _top_obl    = (330 + r) % 360
+                _bottom_obl = (150 + r) % 360
+            else:
+                _top_obl    = 90.0
+                _bottom_obl = 270.0
+
+        # Resolve oblique and dimstyle.
+        # Explicit sides (top/bottom/right/left) bypass variant adjustments.
+        # Relative sides (default/opposite) apply isometric variant adjustments.
+        # Dimstyle per face — universal for all isometric variants:
+        #   base_la in (150, 330)  [Y-axis pipes]: top/bottom=ISO -30, right/left=ISO 30
+        #   all other pipes (X / Z axis):          top/bottom=ISO 30,  right/left=ISO -30
+        _iso = not is_sk_orthogonal
         if side == "top":
             oblique_deg = _top_obl
             dimstyle_name = "ISOMETRIC -30"
-            # Vertical pipe: text rotation 90° + ISO-30 oblique tilts text to kanan-atas.
-            # Swap to ISO 30 so text tilts to kiri-atas (correct isometric direction).
-            if base_la in (90, 270) and start_block in ("start-BR", "start-TL"):
+            if _iso and base_la not in (150, 330):
                 dimstyle_name = "ISOMETRIC 30"
         elif side == "bottom":
             oblique_deg = _bottom_obl
             dimstyle_name = "ISOMETRIC -30"
-            if base_la in (90, 270) and start_block in ("start-BR", "start-TL"):
+            if _iso and base_la not in (150, 330):
                 dimstyle_name = "ISOMETRIC 30"
         elif side == "right":
             oblique_deg = _right_obl
-            # Variant-specific dimstyle swap for non-vertical pipes only.
-            # Vertical pipes keep ISO -30 since rotation 90° + swap gives wrong text lean.
             dimstyle_name = "ISOMETRIC -30"
-            if base_la not in (90, 270) and start_block in ("start-BR", "start-TL"):
+            if _iso and base_la in (150, 330):
                 dimstyle_name = "ISOMETRIC 30"
         elif side == "left":
             oblique_deg = _left_obl
             dimstyle_name = "ISOMETRIC -30"
-            if base_la not in (90, 270) and start_block in ("start-BR", "start-TL"):
+            if _iso and base_la in (150, 330):
                 dimstyle_name = "ISOMETRIC 30"
         else:
-            # 'default' / 'opposite' — relative to pipe, apply variant-specific adjustments
+            # 'default' / 'opposite'
             if side == "opposite":
                 oblique_deg = (oblique_deg + 180) % 360
-            dimstyle_name = "ISOMETRIC -30"
-            if start_block == "start-BL":
-                dimstyle_name = "ISOMETRIC 30"
-                oblique_deg = (360 - oblique_deg) % 360
-            elif start_block == "start-TR":
-                dimstyle_name = "ISOMETRIC 30"
-                oblique_deg = (oblique_deg + 180) % 360
-            elif start_block == "start-TL":
-                if line_angle in (90, 270):
+            if is_sk_orthogonal:
+                # Standard orthogonal: no isometric text-slant adjustments
+                dimstyle_name = "STANDARD"
+            else:
+                dimstyle_name = "ISOMETRIC -30"
+                if start_block == "start-BL":
                     dimstyle_name = "ISOMETRIC 30"
                     oblique_deg = (360 - oblique_deg) % 360
+                elif start_block == "start-TR":
+                    dimstyle_name = "ISOMETRIC 30"
+                    oblique_deg = (oblique_deg + 180) % 360
+                elif start_block == "start-TL":
+                    if line_angle_key in (90, 270):
+                        dimstyle_name = "ISOMETRIC 30"
+                        oblique_deg = (360 - oblique_deg) % 360
 
         perp_rad = math.radians(oblique_deg)
         cos_p, sin_p = math.cos(perp_rad), math.sin(perp_rad)
         base = (p2[0] + dim_offset * cos_p, p2[1] + dim_offset * sin_p)
-        mid = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
-        text_pos = (mid[0] + dim_offset * cos_p, mid[1] + dim_offset * sin_p)
 
+        dim_text = str(int(length_mm))
+        # Render a temporary dim so ezdxf registers any required block definitions
+        # (e.g. _DOTSMALL) and gives us a geometry block to harvest styling from.
         dimensi = msp.add_linear_dim(
             base=base, p1=p1, p2=p2, angle=dim_angle,
-            text=str(int(length_mm)), dimstyle=dimstyle_name,
+            text=dim_text, dimstyle=dimstyle_name,
             dxfattribs={"layer": "DIM SK"}, override=DIM_OVERRIDES,
         )
-        dimensi.user_location_override(text_pos)
         dimensi.render()
         dim_entity = dimensi.dimension
 
-        dim_entity.dxf.defpoint = (base[0], base[1], 0)
-        fix_oblique_geometry(doc, dim_entity, p1, p2, base, dim_angle, oblique_deg)
+        # Compute correct isometric geometry and harvest styling.
+        geom_block = doc.blocks.get(dim_entity.dxf.geometry)
+        gdata = _compute_dim_geometry(
+            dim_entity, p1, p2, base, dim_angle, oblique_deg, geom_block
+        )
 
-        if do_explode:
-            explode_dimension(doc, msp, dim_entity)
-        return dim_entity
+        # Delete the ezdxf-rendered dim entity and its geometry block entirely.
+        # We draw everything ourselves directly into MSP so nothing from the
+        # ezdxf-generated geometry block ends up in the file.
+        geom_block_name = dim_entity.dxf.geometry
+        msp.delete_entity(dim_entity)
+        if geom_block_name and geom_block_name in doc.blocks:
+            try:
+                doc.blocks.delete_block(geom_block_name, safe=False)
+            except Exception:
+                pass
+
+        tc = gdata['tc']
+        if tc is None:
+            return None
+
+        arrow1 = gdata['arrow1']
+        arrow2 = gdata['arrow2']
+        cos_ext = gdata['cos_ext']
+        sin_ext = gdata['sin_ext']
+        cos_dim = gdata['cos_dim']
+        line_attribs = gdata['line_attribs']
+        insert_block_name = gdata['insert_block_name']
+        insert_attribs = gdata['insert_attribs']
+        mtext_props = gdata['mtext_props']
+
+        # Extension lines (small gap at the measured-point end).
+        ext_gap = 0.4
+        for p_pt, arrow in ((p1, arrow1), (p2, arrow2)):
+            msp.add_line(
+                (p_pt[0] + ext_gap * cos_ext, p_pt[1] + ext_gap * sin_ext, 0),
+                (arrow[0], arrow[1], 0),
+                dxfattribs=line_attribs,
+            )
+
+        # Dimension line split around tc.
+        total = math.sqrt((arrow2[0] - arrow1[0])**2 + (arrow2[1] - arrow1[1])**2)
+        # Always derive char_ht from DIM_OVERRIDES — the dimstyle in the template
+        # may have a much larger char_height that would make text oversized.
+        char_ht = DIM_OVERRIDES.get("dimtxt", 2.5) * DIM_OVERRIDES.get("dimscale", 0.8)
+
+        # Measure text width, then open an ASYMMETRIC gap:
+        #   - clearance_start: space before the first character (slightly more)
+        #   - clearance_end  : space after the last character (tighter)
+        # This matches the visual convention where a number "breathes" more
+        # before its first digit than after its last.
+        # Map dimstyle → text style directly (reliable: we set dimstyle_name ourselves).
+        # mtext_props.get('style') is NOT used because ezdxf may omit the style
+        # attribute in the geometry-block MTEXT, causing silent fallback to 'ISO 30'
+        # for all dims — making gap estimates wrong for 'ISOMETRIC -30' dims.
+        _DIM_TO_TEXT_STYLE = {'ISOMETRIC 30': 'ISO 30', 'ISOMETRIC -30': 'ISO-30'}
+        _text_style = _DIM_TO_TEXT_STYLE.get(dimstyle_name, 'ISO 30')
+        text_w = _estimate_text_width(dim_text, char_ht, text_style=_text_style)
+        clearance_start = 0.85  # before first char  ← adjust di sini
+        clearance_end   = 0.35  # after last char    ← adjust di sini
+        cap = total * 0.44
+
+        if total > 1e-6:
+            dv = ((arrow2[0] - arrow1[0]) / total, (arrow2[1] - arrow1[1]) / total)
+        else:
+            dv = (cos_dim, math.sin(math.radians(dim_angle)))
+
+        # Determine which gap end sits before the first character (reading direction).
+        # Text flows at dim_angle; first char is in the dir(dim_angle+180°) direction.
+        # If that aligns with +dv → first char is on the ge side.
+        # If it aligns with -dv → first char is on the gs side.
+        _r180 = math.radians(dim_angle + 180.0)
+        _dot  = math.cos(_r180) * dv[0] + math.sin(_r180) * dv[1]
+        _ge_is_start = _dot >= 0   # True = ge side holds the first char
+
+        # "ISOMETRIC 30" is used on mirrored isometric faces (e.g. side="right"/"left"
+        # for non-vertical pipes in BR/TL). The visual reading direction is reversed on
+        # these faces, so flip the clearance assignment.
+        if dimstyle_name == "ISOMETRIC 30":
+            _ge_is_start = not _ge_is_start
+
+        if _ge_is_start:
+            hg_ge = min(text_w / 2.0 + clearance_start, cap)
+            hg_gs = min(text_w / 2.0 + clearance_end,   cap)
+        else:
+            hg_ge = min(text_w / 2.0 + clearance_end,   cap)
+            hg_gs = min(text_w / 2.0 + clearance_start, cap)
+
+        gs = (tc[0] - hg_gs * dv[0], tc[1] - hg_gs * dv[1])
+        ge = (tc[0] + hg_ge * dv[0], tc[1] + hg_ge * dv[1])
+        msp.add_line((arrow1[0], arrow1[1], 0), (gs[0], gs[1], 0), dxfattribs=line_attribs)
+        msp.add_line((ge[0], ge[1], 0), (arrow2[0], arrow2[1], 0), dxfattribs=line_attribs)
+
+        # Dot markers at arrow tips.
+        if insert_block_name and insert_block_name in doc.blocks:
+            for arrow in (arrow1, arrow2):
+                msp.add_blockref(insert_block_name,
+                                 insert=(arrow[0], arrow[1], 0),
+                                 dxfattribs=insert_attribs)
+
+        # MTEXT at tc — MiddleCenter (attachment_point=5) + width=0 is correct for
+        # AutoCAD/DWG: AutoCAD centers the text bounding box at the insert point.
+        # ezdxf SVG/PDF rendering is fixed separately by fix_mtext_for_ezdxf_render()
+        # in dxf_to_svg.py which converts attachment_point=5 → 4 (MiddleLeft) with
+        # the insert shifted by -text_w/2 before rendering. Do NOT set width > 0 here
+        # as that left-aligns text within the box in AutoCAD, shifting it out of the gap.
+        rotation = dim_angle
+        mt_attribs = {
+            'insert': (tc[0], tc[1], 0),
+            'attachment_point': 5,
+            'char_height': char_ht,
+            'rotation': rotation,
+            'width': 0,
+        }
+        for attr in ('layer', 'color', 'style'):
+            if attr in mtext_props:
+                mt_attribs[attr] = mtext_props[attr]
+        if 'layer' not in mt_attribs:
+            mt_attribs['layer'] = 'DIM SK'
+        msp.add_mtext(dim_text, dxfattribs=mt_attribs)
+
+        return None  # dim_entity was deleted; all visual elements added directly to MSP
 
     def generate(self, request: Dict[str, Any], output_path: str) -> Tuple[bool, str, Optional[str]]:
         """Generate DXF from request dict. Returns (success, message, output_file_path)."""
@@ -525,8 +738,12 @@ class IsometricEngine:
             segments = request["segments"]
             combined_dims = request.get("combined_dims", [])
 
-            # SK: accumulate pipe points → LWPOLYLINE (blue, const_width=1)
+            # SK: accumulate pipe points → LWPOLYLINE (warna global sk_line_color, const_width=1)
             # Pipes are rendered AFTER all components so they appear on top (higher z-order).
+            _sk_color_raw = request.get("sk_line_color")
+            _sk_color = int(_sk_color_raw) if _sk_color_raw and int(_sk_color_raw) > 0 else None
+            sk_style = {**STYLE_SK, "color": _sk_color} if _sk_color else STYLE_SK
+
             sk_poly_pts: List[Tuple[float, float]] = []
             sk_deferred_polys: List[List[Tuple[float, float]]] = []
             pending_sk_dims: List[dict] = []
@@ -543,7 +760,7 @@ class IsometricEngine:
                     sk_deferred_polys.append(list(sk_poly_pts))
                 sk_poly_pts.clear()
                 for pts in sk_deferred_polys:
-                    pl = msp.add_lwpolyline(pts, dxfattribs=STYLE_SK)
+                    pl = msp.add_lwpolyline(pts, dxfattribs=sk_style)
                     pl.dxf.const_width = 1.0
                 sk_deferred_polys.clear()
                 for d in pending_sk_dims:
@@ -559,7 +776,10 @@ class IsometricEngine:
 
 
 
-            angle_dim_map = self._build_dim_map(start_rotation)
+            if module == "SK":
+                angle_dim_map = dict(_BASE_DIM_MAP_SK)
+            else:
+                angle_dim_map = self._build_dim_map(start_rotation)
             cursor = start_insert
             prev_angle = None
             seg_positions: Dict[int, Dict[str, Tuple[float, float]]] = {}
@@ -575,6 +795,8 @@ class IsometricEngine:
                         continue
                     angle = self._resolve_pipe_angle(seg, start_block, start_rotation)
                     want_dim = seg.get("dimension", False)
+                    seg_color = seg.get("color") or None
+                    pipe_style = {**STYLE_CYAN, "color": int(seg_color)} if seg_color and int(seg_color) > 0 else STYLE_CYAN
 
                     if module != "SK" and prev_angle is not None and angle != prev_angle:
                         if should_invert_arc(start_block):
@@ -593,14 +815,30 @@ class IsometricEngine:
                             bend_side=bend_side, real_from=prev_angle
                         )
                         msp.add_arc(center=center, radius=radius,
-                                    start_angle=as_, end_angle=ae_, dxfattribs=STYLE_CYAN)
+                                    start_angle=as_, end_angle=ae_, dxfattribs=pipe_style)
                         cursor = new_cursor
 
                     seg_positions[i] = {"start": cursor}
 
-                    # Cap visual length at MAX_VISUAL_LENGTH_MM; draw breakline if capped
-                    is_capped = length_mm > MAX_VISUAL_LENGTH_MM
-                    visual_mm = min(length_mm, MAX_VISUAL_LENGTH_MM)
+                    # Per-segment breakline opt-in. When `seg.breakline` is set:
+                    #   * style="zigzag"   -> render two half-lines with the
+                    #     NTS zigzag symbol at the midpoint.
+                    #   * style="straight" -> render a single straight line of
+                    #     the visual length, no zigzag (uniform/template look).
+                    # In both cases the dimension shows real_length_mm (or
+                    # length_mm as fallback). When `breakline` is None the
+                    # pipe is drawn at full length_mm with no break.
+                    breakline_cfg = seg.get("breakline") or None
+                    draw_breakline_symbol = False
+                    if breakline_cfg:
+                        visual_mm = float(breakline_cfg.get("visual_length_mm") or length_mm)
+                        dim_length_mm = float(breakline_cfg.get("real_length_mm") or length_mm)
+                        bl_style = (breakline_cfg.get("style") or "zigzag").lower()
+                        draw_breakline_symbol = (bl_style == "zigzag")
+                    else:
+                        visual_mm = length_mm
+                        dim_length_mm = length_mm
+                    is_capped = draw_breakline_symbol  # only zigzag triggers split-line drawing
                     visual_units = mm_to_units(visual_mm)
 
                     endpoint = calc_endpoint(cursor, angle, visual_units)
@@ -613,19 +851,61 @@ class IsometricEngine:
                         # Draw two half-lines with a breakline gap in the middle
                         midpoint = ((cursor[0] + endpoint[0]) / 2,
                                     (cursor[1] + endpoint[1]) / 2)
-                        # Gap size in DXF units (matches draw_breakline gap param)
+                        # Gap along pipe (DXF units): matches draw_breakline `gap`
                         break_gap = 1.2
                         gap_start = calc_endpoint(midpoint, angle, -break_gap)
                         gap_end   = calc_endpoint(midpoint, angle,  break_gap)
-                        msp.add_line(cursor, gap_start, dxfattribs=STYLE_CYAN)
-                        msp.add_line(gap_end, endpoint,  dxfattribs=STYLE_CYAN)
-                        draw_breakline(msp, midpoint, angle, STYLE_CYAN)
+                        msp.add_line(cursor, gap_start, dxfattribs=pipe_style)
+                        msp.add_line(gap_end, endpoint,  dxfattribs=pipe_style)
+                        draw_breakline(msp, midpoint, angle, pipe_style)
                     else:
-                        msp.add_line(cursor, endpoint, dxfattribs=STYLE_CYAN)
+                        msp.add_line(cursor, endpoint, dxfattribs=pipe_style)
+
+                    # Pipe overlays: stamp blocks at fractional positions
+                    # along the visual pipe (e.g. direction arrow at 0.5).
+                    # Rotation auto-follows the pipe's transformed angle so
+                    # the overlay aligns with the pipe regardless of which
+                    # start variant is active. The cursor is NOT advanced.
+                    overlays = seg.get("overlays") or []
+                    if overlays and module != "SK":
+                        for ov in overlays:
+                            ov_block = (ov.get("block_by_variant") or {}).get(
+                                start_block, ov.get("block")
+                            )
+                            if not ov_block or ov_block not in doc.blocks:
+                                if ov_block:
+                                    warnings.warn(
+                                        f"Segment {i} overlay block "
+                                        f"{ov_block!r} not found, skipping"
+                                    )
+                                continue
+                            pos = float(ov.get("position", 0.5))
+                            pos = min(max(pos, 0.0), 1.0)
+                            ov_x = cursor[0] + (endpoint[0] - cursor[0]) * pos
+                            ov_y = cursor[1] + (endpoint[1] - cursor[1]) * pos
+                            ov_scale = ov.get("scale") or [1.0, 1.0]
+                            # Per-variant rotation_offset override (e.g. when
+                            # direction-BR vs direction-BL blocks need
+                            # different rotation tuning); falls back to the
+                            # overlay's flat rotation_offset.
+                            rot_off_map = ov.get("rotation_offset_by_variant") or {}
+                            rot_off = rot_off_map.get(
+                                start_block,
+                                ov.get("rotation_offset", 0.0) or 0.0,
+                            )
+                            ov_rotation = angle + float(rot_off)
+                            msp.add_blockref(
+                                ov_block, (ov_x, ov_y),
+                                dxfattribs={
+                                    "rotation": ov_rotation,
+                                    "xscale": float(ov_scale[0]),
+                                    "yscale": float(ov_scale[1]),
+                                },
+                            )
 
                     if want_dim:
                         dim_kwargs = dict(doc=doc, msp=msp, p1=cursor, p2=endpoint,
-                                         line_angle=angle, length_mm=length_mm,
+                                         line_angle=angle, length_mm=dim_length_mm,
                                          start_block=start_block, angle_dim_map=angle_dim_map,
                                          side=seg.get("dimension_side", "default"),
                                          start_rotation=start_rotation)
@@ -653,6 +933,25 @@ class IsometricEngine:
                             continue
                     
                     color = seg.get("color")
+
+                    # Smart block: resolve virtual block name ke variant sesuai arah pipa.
+                    # Dilakukan sebelum cek doc.blocks agar fallback ke nama asli jika variant
+                    # tidak ada di template.
+                    if block_name in SMART_BLOCK_VARIANTS and not is_start_macro:
+                        _pipe_angle_for_smart = prev_angle if prev_angle is not None else 0
+                        _angle_key = round(_pipe_angle_for_smart) % 360
+                        _resolved = SMART_BLOCK_VARIANTS[block_name].get(_angle_key)
+                        if _resolved and _resolved in doc.blocks:
+                            print(f"[SMART_BLOCK] seg {i}: '{block_name}' angle={_angle_key}° → '{_resolved}'")
+                            block_name = _resolved
+                        elif _resolved:
+                            print(f"[SMART_BLOCK] seg {i}: '{block_name}' angle={_angle_key}° → '{_resolved}' NOT IN TEMPLATE, fallback")
+                            warnings.warn(
+                                f"Smart block variant '{_resolved}' not in template, "
+                                f"falling back to '{block_name}'"
+                            )
+                        else:
+                            print(f"[SMART_BLOCK] seg {i}: '{block_name}' angle={_angle_key}° → no mapping found")
 
                     if block_name not in doc.blocks:
                         seg_positions[i]["end"] = cursor
@@ -799,6 +1098,27 @@ class IsometricEngine:
                                                  side=seg.get("dimension_side", "default"),
                                                  start_rotation=start_rotation)
 
+                elif seg_type == "crossing":
+                    # Ditempatkan di koordinat absolut — cursor TIDAK bergerak.
+                    # Block otomatis dipilih berdasarkan start_block variant.
+                    seg_positions[i] = {"start": cursor, "end": cursor}
+                    if module == "SR" and start_block in CROSSING_BLOCK_MAP:
+                        crossing_block = CROSSING_BLOCK_MAP[start_block]
+                        if crossing_block in doc.blocks:
+                            raw_insert = seg.get("insert")
+                            default_pos = CROSSING_INSERT_DEFAULT.get(start_block, (280.0, 90.0))
+                            if raw_insert and len(raw_insert) >= 2:
+                                cx = float(raw_insert[0]) if raw_insert[0] is not None else default_pos[0]
+                                cy = float(raw_insert[1]) if raw_insert[1] is not None else default_pos[1]
+                                crossing_pos = (cx, cy)
+                            else:
+                                crossing_pos = default_pos
+                            raw_scale = seg.get("scale")
+                            sx = float(raw_scale[0]) if raw_scale and raw_scale[0] is not None else 1.0
+                            sy = float(raw_scale[1]) if raw_scale and raw_scale[1] is not None else 1.0
+                            msp.add_blockref(crossing_block, insert=crossing_pos,
+                                             dxfattribs={"xscale": sx, "yscale": sy})
+
                 seg_positions[i]["end"] = cursor
 
             if module == "SK":
@@ -812,8 +1132,13 @@ class IsometricEngine:
                     continue
                 text_mm = cd.get("text_mm")
                 if text_mm is None:
+                    def _seg_real_mm(s):
+                        bl = s.get("breakline") or None
+                        if bl and bl.get("real_length_mm"):
+                            return bl["real_length_mm"]
+                        return s.get("length_mm", 0)
                     text_mm = sum(
-                        segments[j].get("length_mm", 0)
+                        _seg_real_mm(segments[j])
                         for j in range(from_idx, to_idx + 1)
                         if segments[j].get("type", "pipe") == "pipe"
                     )
@@ -821,12 +1146,15 @@ class IsometricEngine:
                 p2 = seg_positions[to_idx]["end"]
                 seg_angle = self._resolve_pipe_angle(segments[from_idx], start_block, start_rotation) \
                     if segments[from_idx].get("type", "pipe") == "pipe" else 90
-                if seg_angle in angle_dim_map:
+                if round(seg_angle) % 360 in angle_dim_map:
+                    cd_offset = cd.get("dim_offset") or 6.0
                     self._auto_dimension(doc, msp, p1=p1, p2=p2,
                                          line_angle=seg_angle, length_mm=text_mm,
                                          start_block=start_block, angle_dim_map=angle_dim_map,
                                          side=cd.get("side", "default"),
-                                         start_rotation=start_rotation)
+                                         start_rotation=start_rotation,
+                                         dim_offset=cd_offset)
+
 
             if output_path:
                 doc.saveas(output_path)
@@ -844,10 +1172,16 @@ class IsometricEngine:
             return False, f"Engine error: {str(e)} | See server logs for traceback", None
 
     def generate_svg_preview(self, request: Dict[str, Any],
-                             customer_data: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+                             customer_data: Optional[Dict[str, Any]] = None,
+                             font_dir=None) -> Tuple[bool, str]:
         """Generate drawing in-memory + text-replace customer data + render to SVG.
         Returns (success, svg_string_or_error)."""
         try:
+            # Pastikan customer_data tersedia di dalam request agar crossing block
+            # logic di generate() bisa membaca material casing.
+            if customer_data is not None:
+                request = {**request, "customer_data": customer_data}
+
             # Build drawing in-memory (pass output_path=None → returns doc)
             success, msg, doc = self.generate(request, output_path=None)
             if not success or not hasattr(doc, 'modelspace'):
@@ -871,7 +1205,7 @@ class IsometricEngine:
                     "[REFF_ID]": "-", "[NAMA]": "-", "[ALAMAT]": "-",
                     "[RT]": "-", "[RW]": "-", "[KELURAHAN]": "-", "[SEKTOR]": "-",
                     "[NO_MGRT]": "-", "[SN_AWAL]": "-", "[KOORDINAT_TAPPING]": "-",
-                    "[19]": "0", "[10]": "0", "[8]": "0", "[7]": "0",
+                    "[19]": "0", "[10]": "0", "[8]": "0", "[7]": "0", "[21]": "0",
                     # SK-specific blanks (material IDs 1,2,3,5,6)
                     "[NO_SK]": "-",
                     "[1]": "0", "[2]": "0", "[3]": "0", "[6]": "0", "[7]": "0",
@@ -880,7 +1214,7 @@ class IsometricEngine:
             svc.process_blocks(doc, replacements)
 
             from app.services.dxf_to_svg import render_dxf_to_svg
-            svg = render_dxf_to_svg(doc)
+            svg = render_dxf_to_svg(doc, font_dir=font_dir)
             return True, svg
         except Exception as e:
             import traceback

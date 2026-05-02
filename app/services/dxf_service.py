@@ -48,6 +48,7 @@ class DxfService:
         mat_elbow    = materials.get("elbow",    materials.get("10", "0"))
         mat_pipa     = materials.get("pipa",     materials.get("8",  "0"))
         mat_sealtape = materials.get("sealtape", materials.get("7",  "0"))
+        mat_casing   = materials.get("casing",   materials.get("21", "0"))
 
         data = {
             "[TANGGAL]": tanggal,
@@ -67,6 +68,7 @@ class DxfService:
             "[10]": str(mat_elbow),
             "[8]": str(mat_pipa),
             "[7]": str(mat_sealtape),
+            "[21]": str(mat_casing),
         }
 
         # Dynamic: add [ID] replacement for every numeric key in materials dict.
