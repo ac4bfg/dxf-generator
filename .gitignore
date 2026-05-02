@@ -47,6 +47,5 @@ testing/*
 templates/*.dwl
 templates/*.dwl2
 
-# Font and logo assets — copy manually from testing/autocad_fonts/ and testing/logo/
-fonts/
-logo/
+# Runtime assets — copy manually to server (fonts, logo, thumbnails)
+assets/

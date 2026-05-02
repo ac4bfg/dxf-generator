@@ -28,8 +28,10 @@ def _resolve_font_dir(settings) -> Path:
     configured = Path(getattr(settings, "pdf_fonts_dir", "") or "")
     if configured and configured.is_dir():
         return configured
-    fallback = Path("testing/autocad_fonts")
-    return fallback if fallback.is_dir() else configured
+    for fallback in (Path("assets/fonts"), Path("testing/autocad_fonts")):
+        if fallback.is_dir():
+            return fallback
+    return configured
 
 
 def verify_api_key(x_api_key: Optional[str] = Header(None)) -> bool:

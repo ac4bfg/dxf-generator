@@ -40,10 +40,10 @@ async def lifespan(_app: FastAPI):
         from app.services.pdf_renderer import _apply_ezdxf_patches, configure_ezdxf_fonts
         _apply_ezdxf_patches()
         font_dir = Path(getattr(settings, 'pdf_fonts_dir', '') or '')
-        if not font_dir.is_dir():
-            font_dir = Path('testing/autocad_fonts')  # legacy fallback
-        if font_dir.is_dir():
-            configure_ezdxf_fonts(font_dir)
+        for fallback in (font_dir, Path('assets/fonts'), Path('testing/autocad_fonts')):
+            if fallback.is_dir():
+                configure_ezdxf_fonts(fallback)
+                break
     except Exception:
         pass  # non-fatal: fonts will be configured on first request as fallback
     yield  # server runs here
