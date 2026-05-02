@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     # Production PDF rendering — points to the directory that holds the SHX/TTF
     # AutoCAD fonts (registered as ezdxf support_dir). Falls back to the
     # repo's `testing/autocad_fonts/` if the configured path doesn't exist.
-    pdf_fonts_dir: str = "testing/autocad_fonts"
+    pdf_fonts_dir: str = "fonts"
     # Directory containing PNG overlays for OLE2FRAME placeholders, named
     # `drawing1.png` (topmost on sheet), `drawing2.png`, …
-    pdf_logo_dir: str = "testing/logo"
+    pdf_logo_dir: str = "logo"
     host: str = "0.0.0.0"
     port: int = 8099
     debug: bool = False

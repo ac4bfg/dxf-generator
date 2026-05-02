@@ -41,7 +41,7 @@ async def lifespan(_app: FastAPI):
         _apply_ezdxf_patches()
         font_dir = Path(getattr(settings, 'pdf_fonts_dir', '') or '')
         if not font_dir.is_dir():
-            font_dir = Path('testing/autocad_fonts')
+            font_dir = Path('testing/autocad_fonts')  # legacy fallback
         if font_dir.is_dir():
             configure_ezdxf_fonts(font_dir)
     except Exception:
