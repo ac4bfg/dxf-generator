@@ -27,7 +27,11 @@ jobs:
           python -m py_compile app/main.py
           python -m py_compile app/config.py
           python -m py_compile app/routes/dxf.py
+          python -m py_compile app/routes/isometric.py
           python -m py_compile app/services/dxf_service.py
+          python -m py_compile app/services/dxf_to_svg.py
+          python -m py_compile app/services/isometric_service.py
+          python -m py_compile app/services/pdf_template_cache.py
 
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
@@ -39,10 +43,10 @@ jobs:
           script: |
             cd /home/deploy/apps/dxf-generator
 
-            # Pull latest code as deploy user
-            sudo -u deploy git pull origin main
+            # Pull latest code (running as deploy user via SSH)
+            git pull origin main
 
-            # Install/update dependencies
+            # Install/update dependencies (venv owned by deploy)
             source venv/bin/activate
             pip install -r requirements.txt
 
