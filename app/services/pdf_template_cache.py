@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 PLACEHOLDER_RE = re.compile(r"\[[A-Z0-9_]+\]")
+
+# Strips DXF MTEXT inline format codes (e.g. \pxsm1; \fArial; \A1; \P {})
+# so PyMuPDF receives clean plain text for rendering.
+_MTEXT_FMT_RE = re.compile(r'\\[A-Za-z~][^;]*;|\\P|\{|\}')
 MM_TO_PT = 72.0 / 25.4
 
 # Cache template content hashes so we read each file once per process.
@@ -230,9 +234,16 @@ def extract_placeholder_entities(doc) -> List[Dict[str, Any]]:
             })
         elif e.dxftype() == "MTEXT" and PLACEHOLDER_RE.search(e.text):
             d = e.dxf
+            # Strip DXF MTEXT format codes so the stored template text
+            # contains only plain text + placeholder tokens. PyMuPDF does
+            # not understand codes like \pxsm1; and would render them as
+            # literal characters if left in.
+            plain_text = _MTEXT_FMT_RE.sub('', e.text).strip()
+            if not PLACEHOLDER_RE.search(plain_text):
+                plain_text = e.text  # fallback: keep original if strip removed placeholder
             items.append({
                 "kind": "MTEXT",
-                "text": e.text,
+                "text": plain_text,
                 "x": float(d.insert.x), "y": float(d.insert.y),
                 "height": float(d.char_height),
                 "width": float(d.width or 0),
