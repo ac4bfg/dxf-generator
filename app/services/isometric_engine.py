@@ -87,9 +87,19 @@ _BALL_VALVE_1_2_MAP: Dict[int, str] = {
     210: "ball_valve_1-2_BL",     # jalur left  (start-BR)
 }
 
+_BALL_VALVE_1_2_MIRROR_MAP: Dict[int, str] = {
+    270: "ball_valve_1-2_up_mirror",    # jalur ke bawah (mirror)
+    90:  "ball_valve_1-2_down_mirror",  # jalur ke atas (mirror)
+    330: "ball_valve_1-2_BR",           # isometric angles — tidak ada mirror variant
+    150: "ball_valve_1-2_TL",
+    30:  "ball_valve_1-2_TR",
+    210: "ball_valve_1-2_BL",
+}
+
 SMART_BLOCK_VARIANTS: Dict[str, Dict[int, str]] = {
     "ball_valve_1-2": _BALL_VALVE_1_2_MAP,
-    "valve": _BALL_VALVE_1_2_MAP,   # alias lama, otomatis resolve ke variant yang tepat
+    "valve": _BALL_VALVE_1_2_MAP,          # alias lama
+    "valve_mirror": _BALL_VALVE_1_2_MIRROR_MAP,  # SK flip variant
 }
 
 

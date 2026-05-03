@@ -616,9 +616,31 @@ def _word_wrap_lines(page, text: str, fontsize: float,
             lines.append(" ".join(current))
         return lines or [""]
     except Exception:
+        # get_text_length unavailable — estimate with fixed char width but
+        # still split on word boundaries, not arbitrary character positions.
         avg_char_w = fontsize * 0.65
-        chars_per = max(1, int(width_pt / avg_char_w))
-        return [text[i:i + chars_per] for i in range(0, max(1, len(text)), chars_per)]
+        max_chars  = max(1, int(width_pt / avg_char_w))
+        words      = text.split()
+        if not words:
+            return [""]
+        lines: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for word in words:
+            wlen = len(word)
+            if not current:
+                current.append(word)
+                current_len = wlen
+            elif current_len + 1 + wlen <= max_chars:
+                current.append(word)
+                current_len += 1 + wlen
+            else:
+                lines.append(" ".join(current))
+                current = [word]
+                current_len = wlen
+        if current:
+            lines.append(" ".join(current))
+        return lines or [""]
 
 
 def _stamp_mtext_wrapped(page, x_pt: float, y_pt: float, text: str,
