@@ -388,11 +388,11 @@ PLACEHOLDER_OFFSETS: Dict[str, Tuple[float, float]] = {
     "[ALAMAT]":             (0.0, 0.0),
 
     # ---- Material count cells (MTEXT, attachment=3 Top Right) ----
-    "[7]":  (-0.125, 0.0),  # sealtape
-    "[19]": (-0.125, 0.0),  # coupler
-    "[10]": (-0.125, 0.0),  # elbow
+    "[7]":  (-0.150, 0.0),  # sealtape
+    "[19]": (-0.150, 0.0),  # coupler
+    "[10]": (-0.150, 0.0),  # elbow
     "[21]": (-0.350, 0.0),  # casing
-    # "[8]":  (0.0, 0.0),   # pipa (M)
+    "[8]":  (-0.150, 0.0),   # pipa (M)
 }
 
 
@@ -589,136 +589,76 @@ def _stamp_text(page, x_pt: float, y_pt: float, text: str, size: float,
     page.insert_text((anchor_x, baseline_y), text, **kwargs)
 
 
-def _count_wrapped_lines(page, text: str, fontsize: float,
-                         width_pt: float, fontname: str) -> int:
-    """Simulate word-wrapping to count lines matching insert_textbox behaviour.
-
-    Measures each word with get_text_length (same font metrics PyMuPDF uses
-    internally) and greedily fills lines — identical algorithm to a standard
-    word-wrap. More accurate than the single-line-width-ratio estimate because
-    it accounts for the varying waste at each line break.
-    """
+def _word_wrap_lines(page, text: str, fontsize: float,
+                     width_pt: float, fontname: str) -> List[str]:
+    """Word-wrap text into a list of lines fitting within width_pt."""
     try:
         words = text.split()
         if not words:
-            return 1
+            return [""]
         space_w = page.get_text_length(" ", fontsize=fontsize, fontname=fontname)
-        n = 1
-        line_w = 0.0
+        lines: List[str] = []
+        current: List[str] = []
+        current_w = 0.0
         for word in words:
             word_w = page.get_text_length(word, fontsize=fontsize, fontname=fontname)
-            if line_w == 0.0:           # first word on a fresh line
-                line_w = word_w
-            elif line_w + space_w + word_w <= width_pt:
-                line_w += space_w + word_w
-            else:                        # word doesn't fit → new line
-                n += 1
-                line_w = word_w
-        return n
+            if not current:
+                current.append(word)
+                current_w = word_w
+            elif current_w + space_w + word_w <= width_pt:
+                current.append(word)
+                current_w += space_w + word_w
+            else:
+                lines.append(" ".join(current))
+                current = [word]
+                current_w = word_w
+        if current:
+            lines.append(" ".join(current))
+        return lines or [""]
     except Exception:
-        # Fallback: character-count estimate with 0.65× factor (measured for
-        # uppercase Arial — wider than the old 0.50 default which was too
-        # narrow and caused insert_textbox to overflow silently).
         avg_char_w = fontsize * 0.65
-        total_w = len(text) * avg_char_w
-        return max(1, math.ceil(total_w / width_pt))
+        chars_per = max(1, int(width_pt / avg_char_w))
+        return [text[i:i + chars_per] for i in range(0, max(1, len(text)), chars_per)]
 
 
 def _stamp_mtext_wrapped(page, x_pt: float, y_pt: float, text: str,
                          size: float, width_mm: float,
                          attachment_point: int, halign: int,
                          font_alias: Optional[str]) -> None:
-    """Stamp a word-wrapping MTEXT field via PyMuPDF insert_textbox.
+    """Stamp a word-wrapping MTEXT field line by line via _stamp_text.
 
-    Called when the placeholder MTEXT has DXF width > 0, meaning the template
-    expects text to wrap within that column width (e.g. the ALAMAT address
-    field that may span 2–3 lines). insert_textbox respects word boundaries
-    and wraps at the supplied rect width, matching AutoCAD/ezdxf SVG output.
+    Renders each wrapped line with insert_text (same as single-line MTEXT)
+    so vertical positioning is identical to the single-line path — no
+    insert_textbox calibration drift.
 
-    Coordinate convention (same as compose_customer_pdf):
-      x_pt, y_pt — PDF-points anchor already including per-placeholder
-                   fine-tune offsets; y_pt is the AP row anchor (Y-down).
+    Line spacing: 1.5 × font size.
+    Vertical anchor per attachment_point:
+      Middle (AP 4-6): centre of all baselines at y_pt + 0.35 × size,
+                       matching single-line MTEXT middle baseline.
+      Top    (AP 1-3): first baseline at y_pt + 0.50 × size.
+      Bottom (AP 7-9): last  baseline at y_pt.
     """
-    import pymupdf as _pm
+    fontname    = font_alias or "helv"
+    width_pt    = width_mm * MM_TO_PT
+    LINE_FACTOR = 1.25
+    line_h_pt   = size * LINE_FACTOR
 
-    fontname  = font_alias or "helv"
-    width_pt  = width_mm * MM_TO_PT
-    line_h_pt = size * 1.5
+    lines = _word_wrap_lines(page, text, size, width_pt, fontname)
+    n = len(lines)
 
-    # Simulate word-wrap to get an accurate line count — avoids the
-    # over-estimation that shifts text upward when a ratio estimate is used.
-    n_lines = _count_wrapped_lines(page, text, size, width_pt, fontname)
+    # First-baseline y — mirrors the single-line MTEXT middle baseline (0.35).
+    # For n lines centred at (y_pt + 0.35*size):
+    #   first_y = (y_pt + 0.35*size) - (n-1)/2 * line_h_pt
+    if attachment_point in (1, 2, 3):        # Top
+        first_y = y_pt + size * 0.50
+    elif attachment_point in (4, 5, 6):      # Middle
+        first_y = (y_pt + size * 0.35) - (n - 1) * line_h_pt / 2
+    else:                                     # Bottom
+        first_y = y_pt - (n - 1) * line_h_pt
 
-    # block_h: height of actual text content (used for centering).
-    # rect_h: block + half-line padding so the last line isn't clipped.
-    block_h_pt = n_lines * line_h_pt
-    rect_h_pt  = block_h_pt + line_h_pt * 0.5
-
-    # Vertical rect bounds.
-    #
-    # AP=4-6 (Middle): y_pt is the DXF anchor for the MIDDLE of the text block.
-    #
-    # Calibration anchor (n=2, empirically confirmed correct):
-    #   y0_n2 = y_pt - 1.15 * size
-    #
-    # For each additional line beyond 2, the rect top must move UP by L_half
-    # so the rendered block stays centred at y_pt:
-    #   y0 = y_pt - 1.15*size - (n-2) * L_HALF * size
-    #
-    # L_HALF ≈ 0.60 corresponds to the natural Arial line height ≈ 1.20 * size.
-    # This is between the pure-centering value (0.75, too high for n>2) and the
-    # fixed value (0.00, too low for n>2), which brackets the correct behaviour.
-    #
-    # AP=1-3 (Top): y0 at y_pt + 0.50*size (matches _stamp_text Top calibration).
-    # AP=7-9 (Bottom): rect grows upward from y_pt.
-    L_HALF = 0.60  # = actual_line_height / 2 ≈ 1.20 / 2
-    if attachment_point in (1, 2, 3):    # Top anchor → rect grows downward
-        y0 = y_pt + size * 0.50
-        y1 = y0 + rect_h_pt
-    elif attachment_point in (4, 5, 6):  # Middle anchor → calibrated per n_lines
-        y0 = y_pt - size * 1.15 - (n_lines - 2) * L_HALF * size
-        y1 = y0 + rect_h_pt
-    else:                                 # Bottom anchor → rect grows upward
-        y0 = y_pt - rect_h_pt
-        y1 = y_pt
-
-    # Horizontal extent from anchor based on halign.
-    if halign == 1:    # center (AP 2,5,8)
-        x0 = x_pt - width_pt / 2
-        x1 = x_pt + width_pt / 2
-    elif halign == 2:  # right (AP 3,6,9)
-        x0 = x_pt - width_pt
-        x1 = x_pt
-    else:              # left (AP 1,4,7)
-        x0 = x_pt
-        x1 = x_pt + width_pt
-
-    # Retry with an extra line if insert_textbox reports overflow (negative return).
-    # This compensates for _count_wrapped_lines underestimating when get_text_length
-    # is unavailable and the fallback heuristic is too narrow.
-    for _attempt in range(3):
-        rect = _pm.Rect(x0, y0, x1, y1)
-        rc = page.insert_textbox(
-            rect, text,
-            fontname=fontname,
-            fontsize=size,
-            color=(0, 0, 0),
-            align=halign,
-        )
-        if rc is None or rc >= 0:
-            break
-        # Overflow — expand rect by one extra line
-        n_lines += 1
-        block_h_pt = n_lines * line_h_pt
-        rect_h_pt  = block_h_pt + line_h_pt * 0.5
-        if attachment_point in (1, 2, 3):
-            y1 = y0 + rect_h_pt
-        elif attachment_point in (4, 5, 6):
-            y0 = y_pt - size * 1.15 - (n_lines - 2) * L_HALF * size
-            y1 = y0 + rect_h_pt
-        else:
-            y0 = y_pt - rect_h_pt
-            y1 = y_pt
+    for i, line in enumerate(lines):
+        _stamp_text(page, x_pt, first_y + i * line_h_pt,
+                    line, size, 0, halign, font_alias)
 
 
 # ---------------------------------------------------------------------------
