@@ -30,22 +30,30 @@ class IsometricService:
         fmt = request.get("output_format", "dxf").lower()
         customer_data = request.get("customer_data")
         base_name = request.get("file_name") or f"isometric_{datetime.datetime.now():%Y%m%d_%H%M%S}"
-        dxf_path = self.output_dir / f"{base_name}.dxf"
 
-        # Generate in-memory so we can apply text replacement before saving
+        # PDF: use the same cached renderer as /preview-drawing-pdf and bulk-pdf
+        # so output is always identical regardless of which path triggered it.
+        if fmt == "pdf":
+            pdf_path = self.output_dir / f"{base_name}.pdf"
+            try:
+                pdf_bytes = self.render_pdf_bytes_cached(request, customer_data)
+                pdf_path.write_bytes(pdf_bytes)
+                return True, "Generated successfully", pdf_path
+            except Exception:
+                # Fallback: full render (no cache)
+                success, msg, doc = self.engine.generate(request, None)
+                if not success:
+                    return False, msg, None
+                self._apply_text_replacement(doc, customer_data)
+                ok = self._generate_pdf(doc, pdf_path)
+                return (True, "Generated successfully", pdf_path) if ok else (False, "PDF generation failed", None)
+
+        dxf_path = self.output_dir / f"{base_name}.dxf"
         success, msg, doc = self.engine.generate(request, None)
         if not success:
             return False, msg, None
 
         self._apply_text_replacement(doc, customer_data)
-
-        if fmt == "pdf":
-            pdf_path = self.output_dir / f"{base_name}.pdf"
-            ok = self._generate_pdf(doc, pdf_path)
-            if not ok:
-                return False, "PDF generation failed", None
-            return True, "Generated successfully", pdf_path
-
         doc.saveas(str(dxf_path))
 
         if fmt == "dwg":
@@ -287,6 +295,139 @@ class IsometricService:
                         break
         except Exception:
             pass
+
+    def generate_bulk_pdf(self, items: List[Dict[str, Any]], file_name: str, progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
+        import logging
+        import fitz
+        log = logging.getLogger(__name__)
+        try:
+            merged = fitz.open()
+            failed = 0
+
+            for i, item in enumerate(items):
+                if cancel_check and cancel_check():
+                    merged.close()
+                    return False, "Cancelled", None
+                try:
+                    # render_pdf_bytes_cached handles generation + text replace
+                    # + cache lookup/save — identical to single preview/download
+                    customer_data = item.get("customer_data")
+                    pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
+
+                    single = fitz.open("pdf", pdf_bytes)
+                    merged.insert_pdf(single)
+                    single.close()
+                except Exception as e:
+                    log.warning("Bulk PDF: skip item due to error: %s", e)
+                    failed += 1
+                finally:
+                    if progress_callback:
+                        progress_callback(i + 1, len(items))
+
+            total = len(merged)
+            if total == 0:
+                merged.close()
+                return False, "No pages generated", None
+
+            pdf_path = self.output_dir / f"{file_name}.pdf"
+            merged.save(str(pdf_path))
+            merged.close()
+
+            msg = f"Generated {total} pages"
+            if failed:
+                msg += f" ({failed} skipped)"
+            return True, msg, pdf_path
+
+        except Exception as e:
+            log.error("Bulk PDF generation error: %s", e)
+            return False, str(e), None
+
+    def generate_bulk_pdf_zip(self, items: List[Dict[str, Any]], file_name: str, progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
+        """Generate one PDF per item and zip them together."""
+        import logging
+        import zipfile as _zipfile
+        log = logging.getLogger(__name__)
+        failed = 0
+        entries: List[tuple] = []  # (zip_name, pdf_bytes)
+        try:
+            for i, item in enumerate(items):
+                if cancel_check and cancel_check():
+                    return False, "Cancelled", None
+                try:
+                    customer_data = item.get("customer_data")
+                    pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
+                    reff_id   = (customer_data or {}).get("reff_id") or f"item_{i+1}"
+                    zip_name  = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
+                    entries.append((zip_name, pdf_bytes))
+                except Exception as e:
+                    log.warning("Bulk PDF ZIP: skip item %d: %s", i, e)
+                    failed += 1
+                finally:
+                    if progress_callback:
+                        progress_callback(i + 1, len(items))
+
+            if not entries:
+                return False, "No files generated", None
+
+            zip_path = self.output_dir / f"{file_name}.zip"
+            with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
+                for name, data in entries:
+                    zf.writestr(name, data)
+
+            msg = f"Generated {len(entries)} files"
+            if failed:
+                msg += f" ({failed} skipped)"
+            return True, msg, zip_path
+        except Exception as e:
+            log.error("Bulk PDF ZIP generation error: %s", e)
+            return False, str(e), None
+
+    def generate_bulk_dwg(self, items: List[Dict[str, Any]], file_name: str, progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
+        import logging
+        import zipfile as _zipfile
+        log = logging.getLogger(__name__)
+        generated: List[Path] = []
+        failed = 0
+        try:
+            for i, item in enumerate(items):
+                if cancel_check and cancel_check():
+                    return False, "Cancelled", None
+                try:
+                    dwg_item = {**item, 'output_format': 'dwg'}
+                    success, msg, file_path = self.generate(dwg_item)
+                    if success and file_path:
+                        generated.append(file_path)
+                    else:
+                        log.warning("Bulk DWG: item %d failed: %s", i, msg)
+                        failed += 1
+                except Exception as e:
+                    log.warning("Bulk DWG: skip item %d: %s", i, e)
+                    failed += 1
+                finally:
+                    if progress_callback:
+                        progress_callback(i + 1, len(items))
+
+            if not generated:
+                return False, "No files generated", None
+
+            zip_path = self.output_dir / f"{file_name}.zip"
+            with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
+                for fp in generated:
+                    zf.write(str(fp), fp.name)
+
+            for fp in generated:
+                try:
+                    fp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            msg = f"Generated {len(generated)} files"
+            if failed:
+                msg += f" ({failed} skipped)"
+            return True, msg, zip_path
+        except Exception as e:
+            log.error("Bulk DWG generation error: %s", e)
+            return False, str(e), None
 
     def _apply_text_replacement(self, doc, customer_data: Optional[Dict] = None):
         from app.services.dxf_service import DxfService

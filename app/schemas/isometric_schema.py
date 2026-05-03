@@ -212,6 +212,24 @@ class IsometricGenerateResponse(BaseModel):
     file_name: Optional[str] = None
 
 
+class BulkPdfItem(BaseModel):
+    module: Literal["SR", "SK"] = "SR"
+    start_block: Optional[str] = "start-BR"
+    start_insert: Optional[Tuple[float, float]] = None
+    start_rotation: float = 0
+    segments: List[Segment] = Field(..., min_length=1)
+    combined_dims: List[CombinedDim] = []
+    customer_data: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "ignore"
+
+
+class BulkPdfRequest(BaseModel):
+    items: List[BulkPdfItem] = Field(..., min_length=1)
+    file_name: Optional[str] = None
+
+
 class BlockInfo(BaseModel):
     name: str
     thumbnail_url: Optional[str] = None

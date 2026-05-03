@@ -377,3 +377,275 @@ async def preview_blank_svg(
         return Response(content=svg, media_type="image/svg+xml")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview error: {str(e)}")
+
+
+## ---------------------------------------------------------------------------
+## Bulk PDF — async job with progress tracking
+## ---------------------------------------------------------------------------
+
+import threading as _threading
+import uuid as _uuid
+
+_bulk_jobs: dict = {}
+_bulk_jobs_lock = _threading.Lock()
+
+
+@router.post("/bulk-pdf")
+async def bulk_generate_pdf(
+    payload: dict = Body(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Start bulk PDF generation job. Returns job_id immediately.
+    Poll /bulk-pdf-status/{job_id} for progress.
+    Payload: {items: [...], file_name?: str}
+    """
+    import asyncio
+    import datetime
+
+    verify_api_key(x_api_key)
+
+    # Use raw dicts (same as /preview-drawing-pdf) so Pydantic default-filling
+    # doesn't produce different field values and break cache key matching.
+    items = payload.get("items", [])
+    file_name_override = payload.get("file_name")
+    count = len(items)
+    module = items[0].get("module", "SR") if items else "SR"
+    date_str = datetime.datetime.now().strftime("%d-%m-%Y")
+    file_name = file_name_override or f"{module}_{count}_{date_str}"
+    job_id = _uuid.uuid4().hex
+
+    with _bulk_jobs_lock:
+        _bulk_jobs[job_id] = {
+            "status": "running",
+            "done": 0,
+            "total": count,
+            "file_name": file_name,
+            "download_url": None,
+            "error": None,
+        }
+
+    service = get_isometric_service(module=module)
+
+    def _progress(done: int, _total: int):
+        with _bulk_jobs_lock:
+            if job_id in _bulk_jobs:
+                _bulk_jobs[job_id]["done"] = done
+
+    def _is_cancelled() -> bool:
+        with _bulk_jobs_lock:
+            return _bulk_jobs.get(job_id, {}).get("status") == "cancelled"
+
+    async def _run():
+        success, message, pdf_path = await asyncio.to_thread(
+            service.generate_bulk_pdf, items, file_name, _progress, _is_cancelled
+        )
+        with _bulk_jobs_lock:
+            if _bulk_jobs.get(job_id, {}).get("status") == "cancelled":
+                return
+            if success and pdf_path:
+                _bulk_jobs[job_id]["status"] = "done"
+                _bulk_jobs[job_id]["done"] = count
+                _bulk_jobs[job_id]["download_url"] = f"/api/isometric/download/{pdf_path.name}"
+            else:
+                _bulk_jobs[job_id]["status"] = "error"
+                _bulk_jobs[job_id]["error"] = message
+
+    asyncio.ensure_future(_run())
+
+    return {"job_id": job_id, "total": count, "file_name": file_name}
+
+
+@router.get("/bulk-pdf-status/{job_id}")
+async def bulk_pdf_status(job_id: str, x_api_key: Optional[str] = Header(None)):
+    """Poll progress of a bulk PDF job."""
+    verify_api_key(x_api_key)
+    with _bulk_jobs_lock:
+        job = _bulk_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.delete("/bulk-pdf/{job_id}")
+async def cancel_bulk_pdf(job_id: str, x_api_key: Optional[str] = Header(None)):
+    """Cancel a running bulk PDF job."""
+    verify_api_key(x_api_key)
+    with _bulk_jobs_lock:
+        if job_id not in _bulk_jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        _bulk_jobs[job_id]["status"] = "cancelled"
+    return {"success": True}
+
+
+## ---------------------------------------------------------------------------
+## Bulk PDF ZIP — async job (individual PDF per customer, zipped)
+## ---------------------------------------------------------------------------
+
+@router.post("/bulk-pdf-zip")
+async def bulk_generate_pdf_zip(
+    payload: dict = Body(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Start bulk PDF-ZIP generation job. Returns job_id immediately.
+    Payload: {items: [...], file_name?: str}
+    """
+    import asyncio
+    import datetime
+
+    verify_api_key(x_api_key)
+
+    items = payload.get("items", [])
+    file_name_override = payload.get("file_name")
+    count = len(items)
+    module = items[0].get("module", "SR") if items else "SR"
+    date_str = datetime.datetime.now().strftime("%d-%m-%Y")
+    file_name = file_name_override or f"{module}_{count}_{date_str}"
+    job_id = _uuid.uuid4().hex
+
+    with _bulk_jobs_lock:
+        _bulk_jobs[job_id] = {
+            "status": "running",
+            "done": 0,
+            "total": count,
+            "file_name": file_name,
+            "download_url": None,
+            "error": None,
+        }
+
+    service = get_isometric_service(module=module)
+
+    def _progress(done: int, _total: int):
+        with _bulk_jobs_lock:
+            if job_id in _bulk_jobs:
+                _bulk_jobs[job_id]["done"] = done
+
+    def _is_cancelled() -> bool:
+        with _bulk_jobs_lock:
+            return _bulk_jobs.get(job_id, {}).get("status") == "cancelled"
+
+    async def _run():
+        success, message, zip_path = await asyncio.to_thread(
+            service.generate_bulk_pdf_zip, items, file_name, _progress, _is_cancelled
+        )
+        with _bulk_jobs_lock:
+            if _bulk_jobs.get(job_id, {}).get("status") == "cancelled":
+                return
+            if success and zip_path:
+                _bulk_jobs[job_id]["status"] = "done"
+                _bulk_jobs[job_id]["done"] = count
+                _bulk_jobs[job_id]["download_url"] = f"/api/isometric/download/{zip_path.name}"
+            else:
+                _bulk_jobs[job_id]["status"] = "error"
+                _bulk_jobs[job_id]["error"] = message
+
+    asyncio.ensure_future(_run())
+    return {"job_id": job_id, "total": count, "file_name": file_name}
+
+
+@router.get("/bulk-pdf-zip-status/{job_id}")
+async def bulk_pdf_zip_status(job_id: str, x_api_key: Optional[str] = Header(None)):
+    """Poll progress of a bulk PDF-ZIP job."""
+    verify_api_key(x_api_key)
+    with _bulk_jobs_lock:
+        job = _bulk_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.delete("/bulk-pdf-zip/{job_id}")
+async def cancel_bulk_pdf_zip(job_id: str, x_api_key: Optional[str] = Header(None)):
+    """Cancel a running bulk PDF-ZIP job."""
+    verify_api_key(x_api_key)
+    with _bulk_jobs_lock:
+        if job_id not in _bulk_jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        _bulk_jobs[job_id]["status"] = "cancelled"
+    return {"success": True}
+
+
+## ---------------------------------------------------------------------------
+## Bulk DWG — async job (shares _bulk_jobs registry with bulk-pdf)
+## ---------------------------------------------------------------------------
+
+@router.post("/bulk-dwg")
+async def bulk_generate_dwg(
+    payload: dict = Body(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Start bulk DWG generation job. Returns job_id immediately.
+    Payload: {items: [...], file_name?: str}
+    """
+    import asyncio
+    import datetime
+
+    verify_api_key(x_api_key)
+
+    items = payload.get("items", [])
+    file_name_override = payload.get("file_name")
+    count = len(items)
+    module = items[0].get("module", "SR") if items else "SR"
+    date_str = datetime.datetime.now().strftime("%d-%m-%Y")
+    file_name = file_name_override or f"{module}_{count}_{date_str}"
+    job_id = _uuid.uuid4().hex
+
+    with _bulk_jobs_lock:
+        _bulk_jobs[job_id] = {
+            "status": "running",
+            "done": 0,
+            "total": count,
+            "file_name": file_name,
+            "download_url": None,
+            "error": None,
+        }
+
+    service = get_isometric_service(module=module)
+
+    def _progress(done: int, _total: int):
+        with _bulk_jobs_lock:
+            if job_id in _bulk_jobs:
+                _bulk_jobs[job_id]["done"] = done
+
+    def _is_cancelled() -> bool:
+        with _bulk_jobs_lock:
+            return _bulk_jobs.get(job_id, {}).get("status") == "cancelled"
+
+    async def _run():
+        success, message, zip_path = await asyncio.to_thread(
+            service.generate_bulk_dwg, items, file_name, _progress, _is_cancelled
+        )
+        with _bulk_jobs_lock:
+            if _bulk_jobs.get(job_id, {}).get("status") == "cancelled":
+                return
+            if success and zip_path:
+                _bulk_jobs[job_id]["status"] = "done"
+                _bulk_jobs[job_id]["done"] = count
+                _bulk_jobs[job_id]["download_url"] = f"/api/isometric/download/{zip_path.name}"
+            else:
+                _bulk_jobs[job_id]["status"] = "error"
+                _bulk_jobs[job_id]["error"] = message
+
+    asyncio.ensure_future(_run())
+    return {"job_id": job_id, "total": count, "file_name": file_name}
+
+
+@router.get("/bulk-dwg-status/{job_id}")
+async def bulk_dwg_status(job_id: str, x_api_key: Optional[str] = Header(None)):
+    """Poll progress of a bulk DWG job."""
+    verify_api_key(x_api_key)
+    with _bulk_jobs_lock:
+        job = _bulk_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.delete("/bulk-dwg/{job_id}")
+async def cancel_bulk_dwg(job_id: str, x_api_key: Optional[str] = Header(None)):
+    """Cancel a running bulk DWG job."""
+    verify_api_key(x_api_key)
+    with _bulk_jobs_lock:
+        if job_id not in _bulk_jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        _bulk_jobs[job_id]["status"] = "cancelled"
+    return {"success": True}
