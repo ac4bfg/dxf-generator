@@ -616,8 +616,10 @@ def _count_wrapped_lines(page, text: str, fontsize: float,
                 line_w = word_w
         return n
     except Exception:
-        # Fallback: rough character-count ratio, no overhead factor
-        avg_char_w = fontsize * 0.5
+        # Fallback: character-count estimate with 0.65× factor (measured for
+        # uppercase Arial — wider than the old 0.50 default which was too
+        # narrow and caused insert_textbox to overflow silently).
+        avg_char_w = fontsize * 0.65
         total_w = len(text) * avg_char_w
         return max(1, math.ceil(total_w / width_pt))
 
@@ -691,14 +693,32 @@ def _stamp_mtext_wrapped(page, x_pt: float, y_pt: float, text: str,
         x0 = x_pt
         x1 = x_pt + width_pt
 
-    rect = _pm.Rect(x0, y0, x1, y1)
-    page.insert_textbox(
-        rect, text,
-        fontname=fontname,
-        fontsize=size,
-        color=(0, 0, 0),
-        align=halign,
-    )
+    # Retry with an extra line if insert_textbox reports overflow (negative return).
+    # This compensates for _count_wrapped_lines underestimating when get_text_length
+    # is unavailable and the fallback heuristic is too narrow.
+    for _attempt in range(3):
+        rect = _pm.Rect(x0, y0, x1, y1)
+        rc = page.insert_textbox(
+            rect, text,
+            fontname=fontname,
+            fontsize=size,
+            color=(0, 0, 0),
+            align=halign,
+        )
+        if rc is None or rc >= 0:
+            break
+        # Overflow — expand rect by one extra line
+        n_lines += 1
+        block_h_pt = n_lines * line_h_pt
+        rect_h_pt  = block_h_pt + line_h_pt * 0.5
+        if attachment_point in (1, 2, 3):
+            y1 = y0 + rect_h_pt
+        elif attachment_point in (4, 5, 6):
+            y0 = y_pt - size * 1.15 - (n_lines - 2) * L_HALF * size
+            y1 = y0 + rect_h_pt
+        else:
+            y0 = y_pt - rect_h_pt
+            y1 = y_pt
 
 
 # ---------------------------------------------------------------------------
