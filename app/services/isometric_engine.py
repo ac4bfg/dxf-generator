@@ -98,8 +98,13 @@ _BALL_VALVE_1_2_MIRROR_MAP: Dict[int, str] = {
 
 SMART_BLOCK_VARIANTS: Dict[str, Dict[int, str]] = {
     "ball_valve_1-2": _BALL_VALVE_1_2_MAP,
-    "valve": _BALL_VALVE_1_2_MAP,          # alias lama
-    "valve_mirror": _BALL_VALVE_1_2_MIRROR_MAP,  # SK flip variant
+    "valve": _BALL_VALVE_1_2_MAP,                        # alias lama (SR)
+    "valve_mirror": _BALL_VALVE_1_2_MIRROR_MAP,          # alias mirror virtual
+    # SK: gunakan map yang sama dengan SR agar semua sudut (isometrik + ortogonal)
+    # ter-resolve dengan benar. Angle 0 (tanpa pipa) tidak ada di map →
+    # engine fallback ke nama block asli yang merupakan real DXF block ✓
+    "ball_valve_1-2_up":        _BALL_VALVE_1_2_MAP,
+    "ball_valve_1-2_up_mirror": _BALL_VALVE_1_2_MIRROR_MAP,
 }
 
 
@@ -503,7 +508,7 @@ class IsometricEngine:
 
     def _auto_dimension(self, doc, msp, p1, p2, line_angle, length_mm,
                         start_block, angle_dim_map, dim_offset=6.0,
-                        side="default", start_rotation=0):
+                        side="default", start_rotation=0, is_sk: bool = False):
         line_angle_key = round(line_angle) % 360
         if line_angle_key not in angle_dim_map:
             return None
@@ -516,9 +521,7 @@ class IsometricEngine:
         r = start_rotation
         base_la = round((line_angle - r) % 360)
 
-        is_sk_orthogonal = start_block not in (
-            "start-BR", "start-BL", "start-TR", "start-TL"
-        )
+        is_sk_orthogonal = False
 
         if is_sk_orthogonal:
             # SK / orthogonal: laterals are simply perpendicular to the pipe
@@ -638,10 +641,18 @@ class IsometricEngine:
         cos_ext = gdata['cos_ext']
         sin_ext = gdata['sin_ext']
         cos_dim = gdata['cos_dim']
-        line_attribs = gdata['line_attribs']
+        line_attribs = dict(gdata['line_attribs'])  # copy agar tidak mutate shared dict
         insert_block_name = gdata['insert_block_name']
         insert_attribs = gdata['insert_attribs']
         mtext_props = gdata['mtext_props']
+
+        # Layer '0' di SK_POLOS.dxf punya color=7 (putih = invisible di SVG).
+        # ACI 7 di ezdxf SVG selalu render sebagai #ffffff (putih), tidak visible
+        # di browser background putih. Gunakan layer 'DIM SK' + color=8 (dark gray)
+        # yang visible di semua background.
+        if is_sk:
+            line_attribs['layer'] = 'DIM SK'
+            line_attribs['color'] = 8  # dark gray — visible di SVG & DWG
 
         # Extension lines (small gap at the measured-point end).
         ext_gap = 0.4
@@ -731,6 +742,9 @@ class IsometricEngine:
                 mt_attribs[attr] = mtext_props[attr]
         if 'layer' not in mt_attribs:
             mt_attribs['layer'] = 'DIM SK'
+        # Untuk SK: pastikan MTEXT juga visible (override color ke dark gray)
+        if is_sk:
+            mt_attribs['color'] = 8
         msp.add_mtext(dim_text, dxfattribs=mt_attribs)
 
         return None  # dim_entity was deleted; all visual elements added directly to MSP
@@ -786,10 +800,7 @@ class IsometricEngine:
 
 
 
-            if module == "SK":
-                angle_dim_map = dict(_BASE_DIM_MAP_SK)
-            else:
-                angle_dim_map = self._build_dim_map(start_rotation)
+            angle_dim_map = self._build_dim_map(start_rotation)
             cursor = start_insert
             prev_angle = None
             seg_positions: Dict[int, Dict[str, Tuple[float, float]]] = {}
@@ -918,7 +929,8 @@ class IsometricEngine:
                                          line_angle=angle, length_mm=dim_length_mm,
                                          start_block=start_block, angle_dim_map=angle_dim_map,
                                          side=seg.get("dimension_side", "default"),
-                                         start_rotation=start_rotation)
+                                         start_rotation=start_rotation,
+                                         is_sk=(module == "SK"))
                         if module == "SK":
                             # Defer: add dimension after LWPOLYLINE flush so it renders on top
                             pending_sk_dims.append(dim_kwargs)
@@ -1106,7 +1118,8 @@ class IsometricEngine:
                                                  line_angle=pipe_angle, length_mm=gap,
                                                  start_block=start_block, angle_dim_map=angle_dim_map,
                                                  side=seg.get("dimension_side", "default"),
-                                                 start_rotation=start_rotation)
+                                                 start_rotation=start_rotation,
+                                                 is_sk=(module == "SK"))
 
                 elif seg_type == "crossing":
                     # Ditempatkan di koordinat absolut — cursor TIDAK bergerak.
@@ -1163,7 +1176,8 @@ class IsometricEngine:
                                          start_block=start_block, angle_dim_map=angle_dim_map,
                                          side=cd.get("side", "default"),
                                          start_rotation=start_rotation,
-                                         dim_offset=cd_offset)
+                                         dim_offset=cd_offset,
+                                         is_sk=(module == "SK"))
 
 
             if output_path:

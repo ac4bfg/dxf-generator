@@ -374,7 +374,7 @@ _DXF_HEIGHT_TO_PT = (72.0 / 25.4) / 0.716
 PLACEHOLDER_OFFSETS: Dict[str, Tuple[float, float]] = {
     # ---- Title block (TEXT entities, valign=2 Middle) ----
     "[REFF_ID]":            (0.0, -0.10),
-    "[NAMA]":               (0.0, -0.10),
+    "[NAMA]":               (-0.075, -0.10),
     "[SEKTOR]":             (0.0, -0.10),
     "[RT]":                 (0.0, -0.10),
     "[RW]":                 (0.0, -0.10),
@@ -385,14 +385,19 @@ PLACEHOLDER_OFFSETS: Dict[str, Tuple[float, float]] = {
     "[TANGGAL]":            (0.0, 0.10),
 
     # ---- Title block (MTEXT, attachment=4 Middle Left) ----
-    "[ALAMAT]":             (0.0, 0.0),
+    "[ALAMAT]":             (-0.075, 0.0),
 
-    # ---- Material count cells (MTEXT, attachment=3 Top Right) ----
-    "[7]":  (-0.150, 0.0),  # sealtape
-    "[19]": (-0.150, 0.0),  # coupler
-    "[10]": (-0.150, 0.0),  # elbow
-    "[21]": (-0.350, 0.0),  # casing
-    "[8]":  (-0.150, 0.0),   # pipa (M)
+    # ---- Material count cells SR (MTEXT, attachment=3 Top Right) ----
+    "[7]":  (-0.150, 0.0),  # sealtape (SR)
+    "[19]": (-0.150, 0.0),  # coupler (SR)
+    "[10]": (-0.150, 0.0),  # elbow (SR)
+    "[21]": (-0.350, 0.0),  # casing (SR)
+    "[8]":  (-0.150, 0.0),  # pipa (SR)
+
+    # ---- Material count cells SK (MTEXT, attachment=3 Top Right) ----
+    "[2]":  (-0.150, 0.0),  # elbow SK
+    "[3]":  (-0.150, 0.0),  # sockdraft SK
+    "[6]":  (-0.150, 0.0),  # klem SK
 }
 
 
