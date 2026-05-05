@@ -172,15 +172,16 @@ def auto_bend_radius(from_angle, to_angle):
 
 def get_block_exit_pos(doc, block_name, insert_pos, scale, rotation=0):
     """Return world-space exit point for cursor after component placement.
-    Reads the first POINT entity found in the block (no layer requirement).
-    Assumes block origin (0,0) = entry port, and the POINT marks the exit port.
-    Returns None if no POINT entity exists in the block."""
+    Reads the first POINT entity that is NOT on layer '_ENTRY' (entry markers
+    must not be mistaken for exit markers — doing so left cursor at the entry
+    position and created a visible gap before the next pipe segment).
+    Returns None if no qualifying POINT entity exists."""
     block_layout = doc.blocks.get(block_name)
     if not block_layout:
         return None
 
     for e in block_layout:
-        if e.dxftype() == 'POINT':
+        if e.dxftype() == 'POINT' and e.dxf.layer != '_ENTRY':
             px = e.dxf.location.x * scale[0]
             py = e.dxf.location.y * scale[1]
             if rotation:
@@ -227,26 +228,40 @@ def get_block_base_point(doc, block_name):
         return 0.0, 0.0
 
 
+def _collect_projs(block, cos_a, sin_a):
+    """Project all geometry in a block onto a direction (cos_a, sin_a).
+    CIRCLE and ARC use center ± radius so their visual edges are correctly measured,
+    not just their centers (which caused gap = radius between pipe and circular blocks)."""
+    projs = []
+    for e in block:
+        t = e.dxftype()
+        if t == 'LINE':
+            projs.append(e.dxf.start.x * cos_a + e.dxf.start.y * sin_a)
+            projs.append(e.dxf.end.x   * cos_a + e.dxf.end.y   * sin_a)
+        elif t in ('ARC', 'CIRCLE'):
+            cx = e.dxf.center.x
+            cy = e.dxf.center.y
+            r  = e.dxf.radius
+            cp = cx * cos_a + cy * sin_a  # center projection
+            projs.append(cp + r)          # far edge along pipe direction
+            projs.append(cp - r)          # near edge along pipe direction
+        elif t == 'LWPOLYLINE':
+            for x, y, *_ in e.get_points():
+                projs.append(x * cos_a + y * sin_a)
+    return projs
+
+
 def get_block_entry_retreat(doc, block_name, pipe_angle):
     """How far the block extends BEHIND origin (0,0) along pipe_angle direction.
     Used to shorten the incoming pipe so it ends flush with the block's back edge."""
     block = doc.blocks.get(block_name)
     if not block:
         return 0.0
-    points = []
-    for e in block:
-        t = e.dxftype()
-        if t == 'LINE':
-            points += [(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)]
-        elif t in ('ARC', 'CIRCLE'):
-            points.append((e.dxf.center.x, e.dxf.center.y))
-        elif t == 'LWPOLYLINE':
-            points += [(x, y) for x, y, *_ in e.get_points()]
-    if not points:
-        return 0.0
     rad = math.radians(pipe_angle)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
-    projs = [px * cos_a + py * sin_a for px, py in points]
+    projs = _collect_projs(block, cos_a, sin_a)
+    if not projs:
+        return 0.0
     return max(0.0, -min(projs))
 
 
@@ -259,26 +274,15 @@ def get_block_gap(doc, block_name, pipe_angle):
     block = doc.blocks.get(block_name)
     if not block:
         return 0, 0, 0.0
-    points = []
-    for e in block:
-        t = e.dxftype()
-        if t == 'LINE':
-            points.append((e.dxf.start.x, e.dxf.start.y))
-            points.append((e.dxf.end.x, e.dxf.end.y))
-        elif t in ('ARC', 'CIRCLE'):
-            points.append((e.dxf.center.x, e.dxf.center.y))
-        elif t == 'LWPOLYLINE':
-            for x, y, *_ in e.get_points():
-                points.append((x, y))
-    if not points:
-        return 0, 0, 0.0
     rad = math.radians(pipe_angle)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
-    projs = [px * cos_a + py * sin_a for px, py in points]
+    projs = _collect_projs(block, cos_a, sin_a)
+    if not projs:
+        return 0, 0, 0.0
     min_p = min(projs)
-    gap = max(projs) - min_p
-    retreat = max(0.0, -min_p)  # how far block extends BEHIND origin (for pipe shortening)
-    return gap, retreat, min_p  # min_p = front face position along pipe_angle
+    gap   = max(projs) - min_p
+    retreat = max(0.0, -min_p)
+    return gap, retreat, min_p
 
 
 def calc_bend(cursor, from_angle, to_angle, radius, bend_side=None, real_from=None):
@@ -1018,10 +1022,17 @@ class IsometricEngine:
                     # Cek apakah block punya POINT exit
                     blk_def = doc.blocks.get(block_name)
                     has_exit_point = (blk_def is not None and not is_start_macro and
-                                      any(e.dxftype() == 'POINT' for e in blk_def))
+                                      any(e.dxftype() == 'POINT' and e.dxf.layer != '_ENTRY'
+                                          for e in blk_def))
 
                     # Save pipe-end cursor BEFORE any retreat — used for base_point alignment.
                     entry_cursor = cursor
+
+                    # Pre-check base_point: when it is set, the user has explicitly marked
+                    # the connection point so the pipe must end exactly there — no geometry-
+                    # based retreat is needed (retreat would create a visible gap).
+                    _bpx_pre, _bpy_pre = get_block_base_point(doc, block_name)
+                    _block_has_base_point = abs(_bpx_pre) > 1e-6 or abs(_bpy_pre) > 1e-6
 
                     if has_exit_point:
                         gap = 0; half_gap = 0; min_proj = 0.0
@@ -1036,12 +1047,19 @@ class IsometricEngine:
                         else:
                             gap, retreat, min_proj = get_block_gap(doc, block_name, pipe_angle)
                             half_gap = retreat  # pipe shortening when block extends BEHIND origin
-                        if half_gap > 0 and prev_angle is not None:
-                            cursor = calc_endpoint(cursor, prev_angle, -half_gap)
+                        # Skip retreat when base_point is set: base_point IS the connection
+                        # point, so the pipe should extend all the way to entry_cursor.
+                        # Retreating would create a gap equal to `retreat` units.
+                        if half_gap > 0 and prev_angle is not None and not _block_has_base_point:
                             if module == "SK":
-                                if sk_poly_pts:
-                                    sk_poly_pts[-1] = cursor
+                                # SK pakai LWPOLYLINE tebal — jangan dipendekkan.
+                                # insert_pos = cursor - min_proj sudah menempatkan
+                                # block sehingga sisi kirinya pas di ujung polyline
+                                # tanpa perlu retreat. Memendekkan polyline akan
+                                # membuat gap = retreat antara ujung line dan dimensi.
+                                pass
                             else:
+                                cursor = calc_endpoint(cursor, prev_angle, -half_gap)
                                 all_lines = [e for e in msp if e.dxftype() == 'LINE']
                                 if all_lines:
                                     all_lines[-1].dxf.end = (cursor[0], cursor[1], 0)
@@ -1095,11 +1113,28 @@ class IsometricEngine:
                         else:
                             auto_offset = get_block_entry_offset(doc, block_name, scale, rotation)
                             if auto_offset is not None:
-                                insert_pos = (insert_pos[0] + auto_offset[0], insert_pos[1] + auto_offset[1])
+                                # Base dari cursor (ujung pipe setelah retreat), BUKAN dari
+                                # insert_pos yang sudah digeser min_proj. Menambah auto_offset
+                                # di atas insert_pos berbasis min_proj menyebabkan double-offset:
+                                # block bergeser 2× sehingga left edge jauh dari ujung polyline.
+                                insert_pos = (cursor[0] + auto_offset[0], cursor[1] + auto_offset[1])
                             else:
                                 ofbv = (seg.get("insert_offset_by_variant") or {}).get(start_block)
                                 if ofbv:
                                     insert_pos = (insert_pos[0] + ofbv[0], insert_pos[1] + ofbv[1])
+
+                    # SK: perpanjang LWPOLYLINE dari ujung pipe (cursor) ke insert_pos
+                    # (asal block/body valve) agar tidak ada gap antara garis dan ball valve.
+                    # Dimensi terakhir juga dimajukan ke insert_pos supaya panahnya
+                    # tepat di ujung visual garis yang sudah diperpanjang.
+                    if module == "SK" and not arc_mid and not is_start_macro:
+                        dx = insert_pos[0] - cursor[0]
+                        dy = insert_pos[1] - cursor[1]
+                        if dx * dx + dy * dy > 1e-6:
+                            sk_deferred_polys.append([tuple(cursor), tuple(insert_pos)])
+                            if pending_sk_dims:
+                                last = pending_sk_dims[-1]
+                                pending_sk_dims[-1] = {**last, 'p2': insert_pos}
 
                     attribs = {"xscale": scale[0], "yscale": scale[1], "rotation": rotation}
                     if color is not None:
