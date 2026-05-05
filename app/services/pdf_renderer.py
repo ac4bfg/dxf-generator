@@ -401,10 +401,13 @@ def rewrite_mtext_inline_fonts(doc) -> None:
                 e.text = new_text
 
 
-def replace_dot_blocks(doc) -> None:
+def replace_dot_blocks(doc, scale: float = 0.35) -> None:
     """Replace LWPOLYLINE-with-bulge "dots" inside each
     :data:`DOT_BLOCKS_TO_FILL` block with a CIRCLE + solid HATCH so the
     rendered dot is a clean filled disc (no 2-arc junction line).
+
+    *scale* shrinks the dot radius for SVG/PDF output (DWG is unaffected
+    because DWG export skips this function entirely).
     """
     for block in doc.blocks:
         if block.name.lower() not in DOT_BLOCKS_TO_FILL:
@@ -422,7 +425,7 @@ def replace_dot_blocks(doc) -> None:
         x1, y1 = pts[1][:2]
         seg_len = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
         const_width = float(getattr(polyline.dxf, "const_width", 0.0) or 0.0)
-        radius = seg_len / 2.0 + const_width / 2.0
+        radius = (seg_len / 2.0 + const_width / 2.0) * scale
         cx = (x0 + x1) / 2.0
         cy = (y0 + y1) / 2.0
         layer_name = polyline.dxf.layer
