@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     default_output_format: str = "dwg"
     dwg_version: str = "ACAD2018"
 
+    # Concurrency & multi-worker settings
+    workers: int = 1
+    max_concurrent_heavy: int = 1
+    jobs_path: str = ""  # defaults to {output_path}/jobs when empty
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

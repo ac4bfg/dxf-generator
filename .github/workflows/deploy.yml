@@ -31,7 +31,10 @@ jobs:
           python -m py_compile app/services/dxf_service.py
           python -m py_compile app/services/dxf_to_svg.py
           python -m py_compile app/services/isometric_service.py
+          python -m py_compile app/services/isometric_engine.py
+          python -m py_compile app/services/pdf_renderer.py
           python -m py_compile app/services/pdf_template_cache.py
+          python -m py_compile app/services/job_store.py
 
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
@@ -50,12 +53,20 @@ jobs:
             source venv/bin/activate
             pip install -r requirements.txt
 
-            # Restart service
-            sudo systemctl restart dxf-generator
-            sleep 2
+            # Pastikan direktori jobs ada dan writable (untuk file-based job state)
+            mkdir -p output/jobs
+            chmod 755 output/jobs
 
-            # Check status
+            # Graceful restart: beri waktu 30 detik untuk selesaikan request yang berjalan
+            sudo systemctl restart dxf-generator
+            sleep 3
+
+            # Check semua worker process aktif
             sudo systemctl status dxf-generator --no-pager
 
-            # Verify health endpoint
-            curl -s http://localhost:8099/api/dxf/health || echo "Health check failed"
+            # Verify health endpoint (retry 3x karena multi-worker butuh waktu spawn)
+            for i in 1 2 3; do
+              curl -sf http://localhost:8099/ && break
+              echo "Waiting for workers to start... ($i/3)"
+              sleep 2
+            done

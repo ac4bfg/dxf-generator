@@ -1,0 +1,76 @@
+# ============================================================
+# Systemd service untuk DXF Generator (FastAPI / Uvicorn multi-worker)
+# ============================================================
+# Install (satu kali di server):
+#   sudo cp dxf-generator.systemd.service /etc/systemd/system/dxf-generator.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable dxf-generator
+#   sudo systemctl start dxf-generator
+#
+# Edit config: sudo systemctl edit dxf-generator  (untuk override tanpa edit file ini)
+# Reload config: sudo systemctl daemon-reload && sudo systemctl restart dxf-generator
+# Log live: sudo journalctl -u dxf-generator -f
+# ============================================================
+
+[Unit]
+Description=DXF Generator API (FastAPI / Uvicorn)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/deploy/apps/dxf-generator
+
+# ── Environment (tidak perlu .env file) ─────────────────────
+Environment=DEBUG=false
+Environment=HOST=127.0.0.1
+Environment=PORT=8099
+
+# Jumlah worker process (satu per CPU core yang dialokasikan ke service ini)
+# Server 20 core: sisakan core untuk PHP-FPM + MySQL + Nginx
+Environment=WORKERS=4
+
+# Max generate berat bersamaan per worker (WORKERS × nilai ini = total paralel)
+Environment=MAX_CONCURRENT_HEAVY=1
+
+# Path output & assets (sesuaikan jika berbeda)
+Environment=OUTPUT_PATH=/home/deploy/apps/dxf-generator/output
+
+# ODA converter untuk output DWG
+Environment=ODA_PATH=/usr/bin/ODAFileConverter_27.1.0.0/ODAFileConverter
+Environment=ODA_ENABLED=true
+Environment=DEFAULT_OUTPUT_FORMAT=dwg
+Environment=DWG_VERSION=ACAD2018
+
+# API key — harus sama dengan DXF_GENERATOR_API_KEY di Laravel .env
+# Ganti dengan nilai yang ada di server
+Environment=API_KEY=isi_dengan_api_key_yang_sama_dengan_laravel
+
+# ── Startup ──────────────────────────────────────────────────
+ExecStart=/home/deploy/apps/dxf-generator/venv/bin/python run.py
+
+# Restart otomatis jika crash
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# ── Graceful shutdown ────────────────────────────────────────
+# SIGTERM ke master → uvicorn teruskan ke semua worker
+# Tunggu 30 detik untuk request aktif selesai
+# KillMode=mixed: paksa kill semua child setelah TimeoutStopSec
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# ── Logging ──────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dxf-generator
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

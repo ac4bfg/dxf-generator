@@ -96,10 +96,14 @@ def main():
     print(f"Debug mode: {settings.debug}")
 
     import uvicorn
+    # reload and workers>1 are mutually exclusive in uvicorn.
+    # In debug mode keep 1 worker; in production use configured worker count.
+    worker_count = 1 if settings.debug else settings.workers
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
+        workers=worker_count,
         reload=settings.debug,
         factory=False
     )
