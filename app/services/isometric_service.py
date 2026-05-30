@@ -344,46 +344,57 @@ class IsometricService:
                 return True, msg, pdf_path
 
             else:
+                import tempfile
+                import os
+                
                 failed = 0
                 total_pages = 0
-                pdf_entries = []
                 processed_count = 0
                 
-                for folder, folder_items in groups.items():
-                    merged = fitz.open()
-                    for item in folder_items:
-                        if cancel_check and cancel_check():
-                            merged.close()
-                            return False, "Cancelled", None
-                        try:
-                            customer_data = item.get("customer_data")
-                            pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
-                            single = fitz.open("pdf", pdf_bytes)
-                            merged.insert_pdf(single)
-                            single.close()
-                        except Exception as e:
-                            log.warning("Bulk PDF: skip item due to error: %s", e)
-                            failed += 1
-                        finally:
-                            processed_count += 1
-                            if progress_callback:
-                                progress_callback(processed_count, len(items))
-                    
-                    if len(merged) > 0:
-                        total_pages += len(merged)
-                        safe_folder = folder.replace('/', '_').replace('\\', '_') if folder else "Tanpa_Sektor"
-                        pdf_entries.append((f"{safe_folder}.pdf", merged.tobytes(garbage=3, deflate=True)))
-                    merged.close()
-
-                if not pdf_entries:
-                    return False, "No pages generated", None
-
                 zip_path = self.output_dir / f"{file_name}.zip"
                 with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
-                    for name, data in pdf_entries:
-                        zf.writestr(name, data)
+                    for folder, folder_items in groups.items():
+                        merged = fitz.open()
+                        for item in folder_items:
+                            if cancel_check and cancel_check():
+                                merged.close()
+                                return False, "Cancelled", None
+                            try:
+                                customer_data = item.get("customer_data")
+                                pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
+                                single = fitz.open("pdf", pdf_bytes)
+                                merged.insert_pdf(single)
+                                single.close()
+                            except Exception as e:
+                                log.warning("Bulk PDF: skip item due to error: %s", e)
+                                failed += 1
+                            finally:
+                                processed_count += 1
+                                if progress_callback:
+                                    progress_callback(processed_count, len(items))
+                        
+                        if len(merged) > 0:
+                            total_pages += len(merged)
+                            safe_folder = folder.replace('/', '_').replace('\\', '_') if folder else "Tanpa_Sektor"
+                            
+                            fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+                            os.close(fd)
+                            try:
+                                merged.save(tmp_path, garbage=3, deflate=True)
+                                zf.write(tmp_path, f"{safe_folder}.pdf")
+                            finally:
+                                os.remove(tmp_path)
+                                
+                        merged.close()
 
-                msg = f"Generated {total_pages} pages in {len(pdf_entries)} files"
+                if total_pages == 0:
+                    try:
+                        zip_path.unlink()
+                    except:
+                        pass
+                    return False, "No pages generated", None
+
+                msg = f"Generated {total_pages} pages in ZIP"
                 if failed:
                     msg += f" ({failed} skipped)"
                 return True, msg, zip_path
