@@ -380,7 +380,7 @@ class IsometricService:
                             fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
                             os.close(fd)
                             try:
-                                merged.save(tmp_path, garbage=3, deflate=True)
+                                merged.save(tmp_path)
                                 zf.write(tmp_path, f"{safe_folder}.pdf")
                             finally:
                                 os.remove(tmp_path)
