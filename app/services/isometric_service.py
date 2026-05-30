@@ -299,44 +299,94 @@ class IsometricService:
     def generate_bulk_pdf(self, items: List[Dict[str, Any]], file_name: str, progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
         import logging
         import fitz
+        import collections
+        import zipfile as _zipfile
         log = logging.getLogger(__name__)
         try:
-            merged = fitz.open()
-            failed = 0
+            groups = collections.defaultdict(list)
+            for item in items:
+                groups[item.get("folder") or ""].append(item)
+            
+            use_zip = any(item.get("folder") for item in items) and len(groups) > 1
 
-            for i, item in enumerate(items):
-                if cancel_check and cancel_check():
+            if not use_zip:
+                merged = fitz.open()
+                failed = 0
+                for i, item in enumerate(items):
+                    if cancel_check and cancel_check():
+                        merged.close()
+                        return False, "Cancelled", None
+                    try:
+                        customer_data = item.get("customer_data")
+                        pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
+                        single = fitz.open("pdf", pdf_bytes)
+                        merged.insert_pdf(single)
+                        single.close()
+                    except Exception as e:
+                        log.warning("Bulk PDF: skip item due to error: %s", e)
+                        failed += 1
+                    finally:
+                        if progress_callback:
+                            progress_callback(i + 1, len(items))
+
+                total = len(merged)
+                if total == 0:
                     merged.close()
-                    return False, "Cancelled", None
-                try:
-                    # render_pdf_bytes_cached handles generation + text replace
-                    # + cache lookup/save — identical to single preview/download
-                    customer_data = item.get("customer_data")
-                    pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
+                    return False, "No pages generated", None
 
-                    single = fitz.open("pdf", pdf_bytes)
-                    merged.insert_pdf(single)
-                    single.close()
-                except Exception as e:
-                    log.warning("Bulk PDF: skip item due to error: %s", e)
-                    failed += 1
-                finally:
-                    if progress_callback:
-                        progress_callback(i + 1, len(items))
-
-            total = len(merged)
-            if total == 0:
+                pdf_path = self.output_dir / f"{file_name}.pdf"
+                merged.save(str(pdf_path))
                 merged.close()
-                return False, "No pages generated", None
 
-            pdf_path = self.output_dir / f"{file_name}.pdf"
-            merged.save(str(pdf_path))
-            merged.close()
+                msg = f"Generated {total} pages"
+                if failed:
+                    msg += f" ({failed} skipped)"
+                return True, msg, pdf_path
 
-            msg = f"Generated {total} pages"
-            if failed:
-                msg += f" ({failed} skipped)"
-            return True, msg, pdf_path
+            else:
+                failed = 0
+                total_pages = 0
+                pdf_entries = []
+                processed_count = 0
+                
+                for folder, folder_items in groups.items():
+                    merged = fitz.open()
+                    for item in folder_items:
+                        if cancel_check and cancel_check():
+                            merged.close()
+                            return False, "Cancelled", None
+                        try:
+                            customer_data = item.get("customer_data")
+                            pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
+                            single = fitz.open("pdf", pdf_bytes)
+                            merged.insert_pdf(single)
+                            single.close()
+                        except Exception as e:
+                            log.warning("Bulk PDF: skip item due to error: %s", e)
+                            failed += 1
+                        finally:
+                            processed_count += 1
+                            if progress_callback:
+                                progress_callback(processed_count, len(items))
+                    
+                    if len(merged) > 0:
+                        total_pages += len(merged)
+                        safe_folder = folder.replace('/', '_').replace('\\', '_') if folder else "Tanpa_Sektor"
+                        pdf_entries.append((f"{safe_folder}.pdf", merged.tobytes(garbage=3, deflate=True)))
+                    merged.close()
+
+                if not pdf_entries:
+                    return False, "No pages generated", None
+
+                zip_path = self.output_dir / f"{file_name}.zip"
+                with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
+                    for name, data in pdf_entries:
+                        zf.writestr(name, data)
+
+                msg = f"Generated {total_pages} pages in {len(pdf_entries)} files"
+                if failed:
+                    msg += f" ({failed} skipped)"
+                return True, msg, zip_path
 
         except Exception as e:
             log.error("Bulk PDF generation error: %s", e)
@@ -356,8 +406,11 @@ class IsometricService:
                 try:
                     customer_data = item.get("customer_data")
                     pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
-                    reff_id   = (customer_data or {}).get("reff_id") or f"item_{i+1}"
                     zip_name  = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
+                    folder    = item.get("folder")
+                    if folder:
+                        safe_folder = folder.replace('/', '_').replace('\\', '_')
+                        zip_name = f"{safe_folder}/{zip_name}"
                     entries.append((zip_name, pdf_bytes))
                 except Exception as e:
                     log.warning("Bulk PDF ZIP: skip item %d: %s", i, e)
@@ -386,7 +439,7 @@ class IsometricService:
         import logging
         import zipfile as _zipfile
         log = logging.getLogger(__name__)
-        generated: List[Path] = []
+        generated: List[Tuple[Path, Optional[str]]] = []
         failed = 0
         try:
             for i, item in enumerate(items):
@@ -396,7 +449,7 @@ class IsometricService:
                     dwg_item = {**item, 'output_format': 'dwg'}
                     success, msg, file_path = self.generate(dwg_item)
                     if success and file_path:
-                        generated.append(file_path)
+                        generated.append((file_path, item.get("folder")))
                     else:
                         log.warning("Bulk DWG: item %d failed: %s", i, msg)
                         failed += 1
@@ -412,10 +465,15 @@ class IsometricService:
 
             zip_path = self.output_dir / f"{file_name}.zip"
             with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
-                for fp in generated:
-                    zf.write(str(fp), fp.name)
+                for fp, folder in generated:
+                    if folder:
+                        safe_folder = folder.replace('/', '_').replace('\\', '_')
+                        arcname = f"{safe_folder}/{fp.name}"
+                    else:
+                        arcname = fp.name
+                    zf.write(str(fp), arcname)
 
-            for fp in generated:
+            for fp, _ in generated:
                 try:
                     fp.unlink(missing_ok=True)
                 except Exception:
