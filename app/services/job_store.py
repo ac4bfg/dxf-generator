@@ -25,7 +25,7 @@ class JobStore:
     def get(self, job_id: str) -> Optional[dict]:
         try:
             return json.loads(self._path(job_id).read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError, PermissionError):
             return None
 
     def exists(self, job_id: str) -> bool:
@@ -54,7 +54,20 @@ class JobStore:
         return self.dir / f"{job_id}.json"
 
     def _atomic_write(self, job_id: str, data: dict) -> None:
+        import time
+
         p = self._path(job_id)
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, p)  # atomic on POSIX; effectively atomic on Windows
+
+        # On Windows, os.replace() can raise PermissionError if the target file
+        # is briefly open for reading by another process (e.g. a concurrent
+        # status-poll request). Retry a few times with a short backoff.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, p)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)

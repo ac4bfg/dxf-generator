@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app.config import get_settings
 from app.routes.dxf import router as dxf_router
 from app.routes.isometric import router as isometric_router
+from app.routes.pdf import router as pdf_router
 
 
 @asynccontextmanager
@@ -68,6 +69,7 @@ app.add_middleware(
 
 app.include_router(dxf_router)
 app.include_router(isometric_router)
+app.include_router(pdf_router)
 
 
 @app.get("/")
