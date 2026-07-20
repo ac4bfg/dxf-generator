@@ -206,6 +206,68 @@ class DxfService:
         except Exception as e:
             return False, f"Conversion error: {e}", None
 
+    def convert_to_dxf(self, dwg_path: Path, output_dir: Optional[Path] = None) -> tuple[bool, str, Optional[Path]]:
+        """Convert a DWG file to DXF via ODA File Converter (reverse of convert_to_dwg).
+
+        Used to render an uploaded DWG for preview: DWG cannot be read by ezdxf
+        directly, so ODA converts it to DXF first. Requires ODA on Linux (xvfb).
+        """
+        if platform.system() == "Windows":
+            return False, "DWG conversion not supported on Windows. Use WSL2 or Linux server.", None
+
+        if not os.path.exists(self.oda_path):
+            return False, f"ODA File Converter not found at {self.oda_path}", None
+
+        if not dwg_path.exists():
+            return False, f"DWG file not found: {dwg_path}", None
+
+        dwg_path_abs = dwg_path.resolve()
+        dwg_filename = dwg_path.name
+        dwg_basename = dwg_path.stem
+        dest_dir = (output_dir or self.output_path)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        expected_dxf = dest_dir / f"{dwg_basename}.dxf"
+
+        try:
+            with tempfile.TemporaryDirectory() as input_dir:
+                with tempfile.TemporaryDirectory() as oda_out_dir:
+                    shutil.copy2(str(dwg_path_abs), os.path.join(input_dir, dwg_filename))
+
+                    cmd = [
+                        "/usr/bin/xvfb-run", "-a",
+                        self.oda_path,
+                        input_dir,
+                        oda_out_dir,
+                        self.dwg_version,
+                        "DXF",
+                        "0",
+                        "1"
+                    ]
+
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env={**os.environ, 'PATH': '/usr/bin:/bin:/usr/local/bin'}
+                    )
+
+                    if result.returncode != 0:
+                        return False, f"ODA conversion failed: {result.stderr}", None
+
+                    temp_dxf_path = os.path.join(oda_out_dir, f"{dwg_basename}.dxf")
+
+                    if not os.path.exists(temp_dxf_path):
+                        return False, f"DXF output not found: {temp_dxf_path}", None
+
+                    shutil.move(temp_dxf_path, str(expected_dxf))
+                    return True, f"Converted to DXF -> {expected_dxf}", expected_dxf
+
+        except subprocess.TimeoutExpired:
+            return False, "ODA conversion timeout (120s)", None
+        except Exception as e:
+            return False, f"Conversion error: {e}", None
+
     def generate_single(self, request_data: dict, output_format: str = "dwg") -> tuple[bool, str, Optional[Path]]:
         data = self.prepare_data(request_data)
         reff_id = request_data.get("reff_id", "unknown")

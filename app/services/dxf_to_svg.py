@@ -199,9 +199,45 @@ PAPER_HEIGHT_MM = 297.0
 STROKE_SHRINK_FACTOR = 0.5
 
 
+def _build_logo_image_tags(logo_overlays, paper_height_mm: float) -> str:
+    """Build <image> tags for logo PNGs positioned at OLE-frame mm coords.
+
+    Each overlay is a dict {png_path, x1, x2, y1, y2} in DXF mm (Y up). The SVG
+    viewBox is in mm with Y down, so Y is flipped: svg_y = paper_height - y2.
+    PNGs are embedded as base64 data URIs so the SVG stays self-contained.
+    """
+    import base64
+    from pathlib import Path as _Path
+
+    tags = []
+    for ov in (logo_overlays or []):
+        try:
+            png_path = _Path(ov["png_path"])
+            if not png_path.exists():
+                continue
+            x1, x2 = float(ov["x1"]), float(ov["x2"])
+            y1, y2 = float(ov["y1"]), float(ov["y2"])
+            w = abs(x2 - x1)
+            h = abs(y2 - y1)
+            if w <= 0 or h <= 0:
+                continue
+            svg_x = min(x1, x2)
+            svg_y = paper_height_mm - max(y1, y2)  # flip Y (DXF up → SVG down)
+            b64 = base64.b64encode(png_path.read_bytes()).decode("ascii")
+            tags.append(
+                f'<image x="{svg_x:.3f}" y="{svg_y:.3f}" '
+                f'width="{w:.3f}" height="{h:.3f}" '
+                f'preserveAspectRatio="none" '
+                f'href="data:image/png;base64,{b64}" />'
+            )
+        except Exception:
+            continue
+    return "".join(tags)
+
+
 def render_dxf_to_svg(doc, paper_width_mm: float = PAPER_WIDTH_MM,
                       paper_height_mm: float = PAPER_HEIGHT_MM,
-                      font_dir=None) -> str:
+                      font_dir=None, logo_overlays=None) -> str:
     """Render modelspace of doc ke SVG string, viewBox dalam paper mm coords.
 
     Output SVG's viewBox = "0 0 paper_width paper_height".
@@ -322,4 +358,7 @@ def render_dxf_to_svg(doc, paper_width_mm: float = PAPER_WIDTH_MM,
         f'style="background:#1f2937">'
     )
     wrapped_inner = f'<g transform="scale({sx:.6f} {sy:.6f})">{inner}</g>'
-    return new_svg_open + wrapped_inner + '</svg>'
+    # Logo overlays are placed in paper-mm coords (viewBox units), outside the
+    # scale group so they sit at the same spot as the editor/PDF OLE stamps.
+    logo_tags = _build_logo_image_tags(logo_overlays, paper_height_mm)
+    return new_svg_open + wrapped_inner + logo_tags + '</svg>'

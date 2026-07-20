@@ -4,7 +4,9 @@ import uuid as _uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Body, HTTPException, Header
+import tempfile
+
+from fastapi import APIRouter, Body, File, HTTPException, Header, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from app.config import get_settings
@@ -206,6 +208,118 @@ async def preview_svg(
         return Response(content=svg, media_type="image/svg+xml")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview error: {str(e)}")
+
+
+def _logo_overlays_from_template(settings, module: str):
+    """Build logo overlays (mm coords + PNG paths) from a module template's
+    OLE2FRAME entities, so an uploaded DWG/DXF gets the same logos at the same
+    positions as the editor/PDF. Returns [] if template or logos are missing.
+    """
+    try:
+        from app.services.isometric_service import IsometricService
+        from app.services.pdf_renderer import collect_ole_frames, _resolve_ole_overlays
+
+        template = (
+            getattr(settings, "sk_isometric_template_path", None) or "templates/SK_POLOS.dxf"
+            if module == "SK"
+            else getattr(settings, "isometric_template_path", None) or settings.template_path
+        )
+        tpl_path = Path(template)
+        if not tpl_path.exists():
+            return []
+
+        svc = IsometricService(
+            template_path=str(tpl_path),
+            output_dir=settings.output_path,
+            thumbnails_dir=getattr(settings, "thumbnails_path", "thumbnails"),
+            oda_path=settings.oda_path,
+            dwg_version=settings.dwg_version,
+        )
+        logo_dir = svc._pdf_logo_dir()
+
+        tpl_doc = ezdxf.readfile(str(tpl_path))
+        frames = collect_ole_frames(tpl_doc)
+        if not frames:
+            return []
+        overlays = _resolve_ole_overlays(logo_dir, frames)
+
+        result = []
+        for f in frames:
+            png = overlays.get(f["idx"])
+            if not png:
+                continue
+            result.append({
+                "png_path": png,
+                "x1": f["x1"], "x2": f["x2"], "y1": f["y1"], "y2": f["y2"],
+            })
+        return result
+    except Exception:
+        return []
+
+
+@router.post("/render-file-svg")
+async def render_file_svg(
+    file: UploadFile = File(..., description="A .dxf or .dwg file to render"),
+    module: str = "SK",
+    x_api_key: Optional[str] = Header(None),
+):
+    """Render an uploaded DXF/DWG file to SVG, with module logos overlaid.
+
+    DXF is read directly by ezdxf. DWG is converted to DXF via ODA first
+    (requires ODA on Linux). Logos are stamped at the same OLE-frame positions
+    as the editor/PDF, read from the module template. Used for on-demand
+    evidence preview; callers should cache the returned SVG.
+    """
+    verify_api_key(x_api_key)
+
+    filename = (file.filename or "").lower()
+    ext = Path(filename).suffix
+    if ext not in (".dxf", ".dwg"):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext or 'unknown'}")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    settings = get_settings()
+    module = (module or "SK").upper()
+
+    def _render() -> str:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_path = Path(tmp_dir) / f"upload{ext}"
+            src_path.write_bytes(raw)
+
+            if ext == ".dwg":
+                dxf_svc = DxfService(
+                    template_path=settings.template_path,
+                    output_path=tmp_dir,
+                    oda_path=settings.oda_path,
+                    dwg_version=settings.dwg_version,
+                )
+                ok, msg, dxf_path = dxf_svc.convert_to_dxf(src_path, output_dir=Path(tmp_dir))
+                if not ok or not dxf_path:
+                    raise ValueError(msg)
+                doc = ezdxf.readfile(str(dxf_path))
+            else:
+                doc = ezdxf.readfile(str(src_path))
+
+            logo_overlays = _logo_overlays_from_template(settings, module)
+            return render_dxf_to_svg(
+                doc,
+                font_dir=_resolve_font_dir(settings),
+                logo_overlays=logo_overlays,
+            )
+
+    sem = _get_semaphore()
+    async with sem:
+        try:
+            svg = await asyncio.to_thread(_render)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Render error: {str(e)}")
+
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 @router.post("/preview-drawing-svg")
