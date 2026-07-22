@@ -2,11 +2,11 @@
 import asyncio
 import uuid as _uuid
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import tempfile
 
-from fastapi import APIRouter, Body, File, HTTPException, Header, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Header, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from app.config import get_settings
@@ -18,6 +18,7 @@ from app.schemas.isometric_schema import (
 )
 from app.services.dxf_service import DxfService
 from app.services.dxf_to_svg import render_dxf_to_svg
+from app.services.pdf_renderer import render_doc_to_pdf_bytes
 from app.services.isometric_service import IsometricService
 from app.services.job_store import JobStore
 import ezdxf
@@ -210,6 +211,37 @@ async def preview_svg(
         raise HTTPException(status_code=500, detail=f"Preview error: {str(e)}")
 
 
+def _logo_overlays_from_doc(doc, settings, module: str):
+    """Build logo overlays (mm coords + PNG paths) from a *rendered doc's own*
+    OLE2FRAME entities. Manual AutoCAD files carry their own kop/logo frames at
+    positions the drafter chose — those must be used, not the system template's,
+    so SVG matches the PDF path (which stamps over the doc's own frames)."""
+    try:
+        from app.services.pdf_renderer import collect_ole_frames, _resolve_ole_overlays
+        from app.services.isometric_service import IsometricService
+
+        svc = get_isometric_service(module=module)
+        logo_dir = svc._pdf_logo_dir()
+
+        frames = collect_ole_frames(doc)
+        if not frames:
+            return []
+        overlays = _resolve_ole_overlays(logo_dir, frames)
+
+        result = []
+        for f in frames:
+            png = overlays.get(f["idx"])
+            if not png:
+                continue
+            result.append({
+                "png_path": png,
+                "x1": f["x1"], "x2": f["x2"], "y1": f["y1"], "y2": f["y2"],
+            })
+        return result
+    except Exception:
+        return []
+
+
 def _logo_overlays_from_template(settings, module: str):
     """Build logo overlays (mm coords + PNG paths) from a module template's
     OLE2FRAME entities, so an uploaded DWG/DXF gets the same logos at the same
@@ -303,7 +335,11 @@ async def render_file_svg(
             else:
                 doc = ezdxf.readfile(str(src_path))
 
-            logo_overlays = _logo_overlays_from_template(settings, module)
+            # Prefer the uploaded file's OWN OLE frames (manual AutoCAD kop
+            # positions); fall back to template positions only if it has none.
+            logo_overlays = _logo_overlays_from_doc(doc, settings, module)
+            if not logo_overlays:
+                logo_overlays = _logo_overlays_from_template(settings, module)
             return render_dxf_to_svg(
                 doc,
                 font_dir=_resolve_font_dir(settings),
@@ -320,6 +356,71 @@ async def render_file_svg(
             raise HTTPException(status_code=500, detail=f"Render error: {str(e)}")
 
     return Response(content=svg, media_type="image/svg+xml")
+
+
+@router.post("/render-file-pdf")
+async def render_file_pdf(
+    file: UploadFile = File(..., description="A .dxf or .dwg file to render"),
+    module: str = "SK",
+    x_api_key: Optional[str] = Header(None),
+):
+    """Render an uploaded DXF/DWG file to PDF (DWG → DXF via ODA → PDF).
+
+    Untuk asbuilt yang tak punya config drawing sistem (mis. DWG manual
+    AutoCAD): file DWG-nya dikonversi langsung jadi PDF. Logo/kop OLE bawaan
+    file ikut ter-stamp. Callers dapat men-cache PDF hasilnya.
+    """
+    verify_api_key(x_api_key)
+
+    filename = (file.filename or "").lower()
+    ext = Path(filename).suffix
+    if ext not in (".dxf", ".dwg"):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext or 'unknown'}")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    settings = get_settings()
+    module = (module or "SK").upper()
+
+    def _render() -> bytes:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_path = Path(tmp_dir) / f"upload{ext}"
+            src_path.write_bytes(raw)
+
+            if ext == ".dwg":
+                dxf_svc = DxfService(
+                    template_path=settings.template_path,
+                    output_path=tmp_dir,
+                    oda_path=settings.oda_path,
+                    dwg_version=settings.dwg_version,
+                )
+                ok, msg, dxf_path = dxf_svc.convert_to_dxf(src_path, output_dir=Path(tmp_dir))
+                if not ok or not dxf_path:
+                    raise ValueError(msg)
+                doc = ezdxf.readfile(str(dxf_path))
+            else:
+                doc = ezdxf.readfile(str(src_path))
+
+            svc = get_isometric_service(module=module)
+            return render_doc_to_pdf_bytes(
+                doc,
+                font_dir=_resolve_font_dir(settings),
+                logo_dir=svc._pdf_logo_dir(),
+                layout_name=module,
+            )
+
+    sem = _get_semaphore()
+    async with sem:
+        try:
+            pdf_bytes = await asyncio.to_thread(_render)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Render error: {str(e)}")
+
+    return Response(content=pdf_bytes, media_type="application/pdf")
 
 
 @router.post("/preview-drawing-svg")
@@ -646,6 +747,90 @@ async def bulk_pdf_zip_status(job_id: str, x_api_key: Optional[str] = Header(Non
 
 @router.delete("/bulk-pdf-zip/{job_id}")
 async def cancel_bulk_pdf_zip(job_id: str, x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+    store = _get_job_store()
+    if not store.exists(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    store.update(job_id, status="cancelled")
+    return {"success": True}
+
+
+# -- Bulk FILE PDF (render DWG/DXF files → individual PDFs zipped) ------------
+
+@router.post("/bulk-file-pdf")
+async def bulk_generate_file_pdf(
+    files: List[UploadFile] = File(..., description="DWG/DXF files to render"),
+    meta: str = Form("[]", description="JSON list [{reff_id, folder}] parallel to files"),
+    module: str = Form("SK"),
+    file_name: Optional[str] = Form(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Start bulk job that renders uploaded DWG/DXF files → PDFs → ZIP.
+
+    Untuk asbuilt dari file (tanpa config drawing sistem), mis. DWG manual.
+    Returns job_id immediately; poll /bulk-file-pdf-status/{job_id}.
+    """
+    import datetime
+    import json as _json
+
+    verify_api_key(x_api_key)
+
+    try:
+        meta_list = _json.loads(meta) if meta else []
+    except Exception:
+        meta_list = []
+
+    payloads = []
+    for i, uf in enumerate(files):
+        raw = await uf.read()
+        m = meta_list[i] if i < len(meta_list) else {}
+        payloads.append({
+            "filename": uf.filename or f"upload_{i}.dwg",
+            "bytes": raw,
+            "reff_id": m.get("reff_id") or f"file_{i}",
+            "folder": m.get("folder"),
+        })
+
+    count = len(payloads)
+    module = (module or "SK").upper()
+    date_str = datetime.datetime.now().strftime("%d-%m-%Y")
+    fname = file_name or f"{module}_DWG_{count}_{date_str}"
+    job_id = _uuid.uuid4().hex
+    store = _get_job_store()
+    service = get_isometric_service(module=module)
+
+    store.create(job_id, {"status": "running", "done": 0, "total": count,
+                          "file_name": fname, "download_url": None, "error": None})
+
+    _progress, _is_cancelled = _make_bulk_callbacks(store, job_id)
+
+    async def _run():
+        success, message, zip_path = await asyncio.to_thread(
+            service.generate_bulk_file_pdf, payloads, fname, _progress, _is_cancelled
+        )
+        if store.status(job_id) == "cancelled":
+            return
+        if success and zip_path:
+            store.update(job_id, status="done", done=count,
+                         download_url=f"/api/isometric/download/{zip_path.name}")
+        else:
+            store.update(job_id, status="error", error=message)
+
+    asyncio.ensure_future(_run())
+    return {"job_id": job_id, "total": count, "file_name": fname}
+
+
+@router.get("/bulk-file-pdf-status/{job_id}")
+async def bulk_file_pdf_status(job_id: str, x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
+    job = _get_job_store().get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.delete("/bulk-file-pdf/{job_id}")
+async def cancel_bulk_file_pdf(job_id: str, x_api_key: Optional[str] = Header(None)):
     verify_api_key(x_api_key)
     store = _get_job_store()
     if not store.exists(job_id):

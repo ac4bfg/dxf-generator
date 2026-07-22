@@ -446,6 +446,92 @@ class IsometricService:
             log.error("Bulk PDF ZIP generation error: %s", e)
             return False, str(e), None
 
+    def generate_bulk_file_pdf(self, files: List[Dict[str, Any]], file_name: str,
+                               progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
+        """Render banyak file DWG/DXF (upload) jadi PDF lalu zip.
+
+        files: list of {"filename", "bytes", "reff_id", "folder"(opsional)}.
+        DWG dikonversi ke DXF via ODA dulu. Untuk asbuilt dari file (tanpa config
+        drawing sistem), mis. DWG manual AutoCAD.
+        """
+        import logging
+        import tempfile
+        import zipfile as _zipfile
+
+        import ezdxf as _ezdxf
+
+        from app.config import get_settings
+        from app.services.dxf_service import DxfService
+        from app.services.pdf_renderer import render_doc_to_pdf_bytes
+
+        log = logging.getLogger(__name__)
+        settings = get_settings()
+        module = self.template_path.stem
+        layout_name = 'SK' if 'SK' in module.upper() else 'SR'
+        font_dir = Path(getattr(settings, "pdf_fonts_dir", "") or "assets/fonts")
+        logo_dir = self._pdf_logo_dir()
+
+        failed = 0
+        entries: List[tuple] = []
+        try:
+            for i, f in enumerate(files):
+                if cancel_check and cancel_check():
+                    return False, "Cancelled", None
+                try:
+                    reff_id = str(f.get("reff_id") or f"file_{i}")
+                    fname = str(f.get("filename") or "upload.dwg")
+                    ext = Path(fname.lower()).suffix
+                    raw = f.get("bytes")
+                    if not raw or ext not in (".dwg", ".dxf"):
+                        raise ValueError(f"file tidak valid: {fname}")
+
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        src = Path(tmp_dir) / f"upload{ext}"
+                        src.write_bytes(raw)
+                        if ext == ".dwg":
+                            dxf_svc = DxfService(template_path=str(self.template_path),
+                                                 output_path=tmp_dir, oda_path=self.oda_path or "",
+                                                 dwg_version=self.dwg_version)
+                            ok, msg, dxf_path = dxf_svc.convert_to_dxf(src, output_dir=Path(tmp_dir))
+                            if not ok or not dxf_path:
+                                raise ValueError(msg)
+                            doc = _ezdxf.readfile(str(dxf_path))
+                        else:
+                            doc = _ezdxf.readfile(str(src))
+
+                        pdf_bytes = render_doc_to_pdf_bytes(
+                            doc, font_dir=font_dir, logo_dir=logo_dir, layout_name=layout_name,
+                        )
+
+                    zip_name = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
+                    folder = f.get("folder")
+                    if folder:
+                        safe_folder = str(folder).replace('/', '_').replace('\\', '_')
+                        zip_name = f"{safe_folder}/{zip_name}"
+                    entries.append((zip_name, pdf_bytes))
+                except Exception as e:
+                    log.warning("Bulk file PDF: skip %d: %s", i, e)
+                    failed += 1
+                finally:
+                    if progress_callback:
+                        progress_callback(i + 1, len(files))
+
+            if not entries:
+                return False, "No files generated", None
+
+            zip_path = self.output_dir / f"{file_name}.zip"
+            with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
+                for name, data in entries:
+                    zf.writestr(name, data)
+
+            msg = f"Generated {len(entries)} files"
+            if failed:
+                msg += f" ({failed} skipped)"
+            return True, msg, zip_path
+        except Exception as e:
+            log.error("Bulk file PDF generation error: %s", e)
+            return False, str(e), None
+
     def generate_bulk_dwg(self, items: List[Dict[str, Any]], file_name: str, progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
         import logging
         import zipfile as _zipfile

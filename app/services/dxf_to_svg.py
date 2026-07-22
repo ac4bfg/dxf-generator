@@ -117,6 +117,39 @@ _BLOCK_MTEXT_ANGLE_CORRECTION_PDF = {
 }
 
 
+def _fix_middlecenter_mtext(entity, doc) -> None:
+    """Convert a MiddleCenter (attachment_point=5) MTEXT to MiddleLeft (4) and
+    shift its insert LEFT by half the rendered text width, so the visual center
+    stays at the original DXF insert point.
+
+    ezdxf's SVG/PDF renderer treats attachment_point=5 as MiddleLeft, placing
+    the insert at the text's left edge instead of its center. Used for both
+    modelspace MTEXT and dimension geometry-block MTEXT (\\A1;<value>)."""
+    if entity.dxf.get('attachment_point', 1) != 5:
+        return
+    char_ht  = float(entity.dxf.get('char_height', 2.5) or 2.5)
+    rotation = float(entity.dxf.get('rotation', 0) or 0)
+    td = entity.dxf.get('text_direction', None)
+    if td is not None:
+        td_angle = math.degrees(math.atan2(td.y, td.x))
+        if abs(td_angle) > 0.1:
+            rotation = td_angle
+            entity.dxf.rotation = rotation
+            entity.dxf.discard('text_direction')
+    plain  = _MTEXT_CODE_RE.sub('', entity.text or '').strip()
+    text_w = _get_mtext_render_width(entity, doc, plain, char_ht)
+    if text_w < 1e-6:
+        return
+    tc  = entity.dxf.insert
+    rad = math.radians(rotation)
+    entity.dxf.insert = (
+        float(tc.x) - (text_w / 2) * math.cos(rad),
+        float(tc.y) - (text_w / 2) * math.sin(rad),
+        float(getattr(tc, 'z', 0)),
+    )
+    entity.dxf.attachment_point = 4
+
+
 def fix_mtext_for_ezdxf_render(doc) -> None:
     """Normalize MTEXT MiddleCenter entities so ezdxf renders them correctly.
 
@@ -134,29 +167,23 @@ def fix_mtext_for_ezdxf_render(doc) -> None:
     saving), because it mutates the entities in place.
     """
     for entity in doc.modelspace().query('MTEXT'):
-        if entity.dxf.get('attachment_point', 1) != 5:
+        _fix_middlecenter_mtext(entity, doc)
+
+    # Fix DIMENSION text: AutoCAD dimensions store their measurement text as
+    # MTEXT (attachment_point=5, MiddleCenter, "\A1;<value>") inside an
+    # anonymous geometry block (*D.., *U..). ezdxf renders the dimension via
+    # that block, but hits the same MiddleCenter-as-MiddleLeft bug — so the
+    # number sits off to the right of the dimension line unless corrected.
+    # System-generated drawings draw dimension text as plain modelspace MTEXT
+    # (0 real DIMENSION entities), so this only matters for manual AutoCAD DWGs.
+    for block in doc.blocks:
+        name = block.name
+        if not (name.startswith('*D') or name.startswith('*U')
+                or name.startswith('*d') or name.startswith('*u')):
             continue
-        char_ht  = float(entity.dxf.get('char_height', 2.5) or 2.5)
-        rotation = float(entity.dxf.get('rotation', 0) or 0)
-        td = entity.dxf.get('text_direction', None)
-        if td is not None:
-            td_angle = math.degrees(math.atan2(td.y, td.x))
-            if abs(td_angle) > 0.1:
-                rotation = td_angle
-                entity.dxf.rotation = rotation
-                entity.dxf.discard('text_direction')
-        plain  = _MTEXT_CODE_RE.sub('', entity.text or '').strip()
-        text_w = _get_mtext_render_width(entity, doc, plain, char_ht)
-        if text_w < 1e-6:
-            continue
-        tc  = entity.dxf.insert
-        rad = math.radians(rotation)
-        entity.dxf.insert = (
-            float(tc.x) - (text_w / 2) * math.cos(rad),
-            float(tc.y) - (text_w / 2) * math.sin(rad),
-            float(getattr(tc, 'z', 0)),
-        )
-        entity.dxf.attachment_point = 4
+        for entity in block:
+            if entity.dxftype() == 'MTEXT':
+                _fix_middlecenter_mtext(entity, doc)
 
     # Fix MTEXT inside crossing blocks: without \A1; the ezdxf renderer places the
     # text centroid at a measured offset from the declared insert (top-aligned bias).
