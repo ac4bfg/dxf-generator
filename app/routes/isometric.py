@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import tempfile
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Header, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Header, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from app.config import get_settings
@@ -124,8 +124,17 @@ async def generate_isometric(
 @router.get("/download/{filename}")
 async def download_isometric(
     filename: str,
+    background_tasks: BackgroundTasks,
+    cleanup: bool = False,
     x_api_key: Optional[str] = Header(None),
 ):
+    """Stream file DWG hasil generate dari output_path.
+
+    Bila cleanup=1, file dihapus dari disk generator SETELAH selesai
+    di-stream (via BackgroundTasks). Dipakai caller yang mengunduh sekali
+    lalu menyimpan sendiri (mis. Laravel → upload ke Google Drive), supaya
+    output_path tak menumpuk file DWG lama.
+    """
     verify_api_key(x_api_key)
     from urllib.parse import unquote
     decoded = unquote(filename)
@@ -133,11 +142,29 @@ async def download_isometric(
     file_path = Path(settings.output_path) / decoded
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {decoded}")
+
+    if cleanup:
+        # Hapus HANYA setelah response terkirim penuh. Path di-resolve dan
+        # dipastikan berada di dalam output_path untuk mencegah path traversal.
+        output_root = Path(settings.output_path).resolve()
+        resolved = file_path.resolve()
+        if output_root in resolved.parents:
+            background_tasks.add_task(_safe_unlink, resolved)
+
     return FileResponse(
         path=str(file_path),
         filename=decoded,
         media_type="application/octet-stream",
+        background=background_tasks,
     )
+
+
+def _safe_unlink(path: Path) -> None:
+    """Hapus file, abaikan error (mis. sudah terhapus / race)."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -763,11 +790,14 @@ async def bulk_generate_file_pdf(
     meta: str = Form("[]", description="JSON list [{reff_id, folder}] parallel to files"),
     module: str = Form("SK"),
     file_name: Optional[str] = Form(None),
+    merge: bool = Form(False),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Start bulk job that renders uploaded DWG/DXF files → PDFs → ZIP.
+    """Start bulk job that renders uploaded DWG/DXF files → PDF.
 
     Untuk asbuilt dari file (tanpa config drawing sistem), mis. DWG manual.
+    merge=False → tiap file jadi PDF, di-ZIP (default).
+    merge=True  → semua digabung jadi SATU PDF (mode "PDF Gabungan").
     Returns job_id immediately; poll /bulk-file-pdf-status/{job_id}.
     """
     import datetime
@@ -805,14 +835,14 @@ async def bulk_generate_file_pdf(
     _progress, _is_cancelled = _make_bulk_callbacks(store, job_id)
 
     async def _run():
-        success, message, zip_path = await asyncio.to_thread(
-            service.generate_bulk_file_pdf, payloads, fname, _progress, _is_cancelled
+        success, message, out_path = await asyncio.to_thread(
+            service.generate_bulk_file_pdf, payloads, fname, _progress, _is_cancelled, merge
         )
         if store.status(job_id) == "cancelled":
             return
-        if success and zip_path:
+        if success and out_path:
             store.update(job_id, status="done", done=count,
-                         download_url=f"/api/isometric/download/{zip_path.name}")
+                         download_url=f"/api/isometric/download/{out_path.name}")
         else:
             store.update(job_id, status="error", error=message)
 

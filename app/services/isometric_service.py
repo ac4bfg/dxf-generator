@@ -447,18 +447,24 @@ class IsometricService:
             return False, str(e), None
 
     def generate_bulk_file_pdf(self, files: List[Dict[str, Any]], file_name: str,
-                               progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
-        """Render banyak file DWG/DXF (upload) jadi PDF lalu zip.
+                               progress_callback=None, cancel_check=None,
+                               merge: bool = False) -> Tuple[bool, str, Optional[Path]]:
+        """Render banyak file DWG/DXF (upload) jadi PDF.
 
         files: list of {"filename", "bytes", "reff_id", "folder"(opsional)}.
         DWG dikonversi ke DXF via ODA dulu. Untuk asbuilt dari file (tanpa config
         drawing sistem), mis. DWG manual AutoCAD.
+
+        merge=False → tiap file jadi PDF terpisah, di-zip (default).
+        merge=True  → semua PDF digabung jadi SATU file .pdf (untuk mode
+                       "PDF Gabungan"). `folder` diabaikan saat merge.
         """
         import logging
         import tempfile
         import zipfile as _zipfile
 
         import ezdxf as _ezdxf
+        import fitz
 
         from app.config import get_settings
         from app.services.dxf_service import DxfService
@@ -471,8 +477,13 @@ class IsometricService:
         font_dir = Path(getattr(settings, "pdf_fonts_dir", "") or "assets/fonts")
         logo_dir = self._pdf_logo_dir()
 
+        import collections
+
         failed = 0
+        # entries: (zip_name, pdf_bytes) untuk mode non-merge.
+        # rendered: (folder, pdf_bytes) untuk mode merge (di-grup nanti).
         entries: List[tuple] = []
+        rendered: List[tuple] = []
         try:
             for i, f in enumerate(files):
                 if cancel_check and cancel_check():
@@ -503,18 +514,64 @@ class IsometricService:
                             doc, font_dir=font_dir, logo_dir=logo_dir, layout_name=layout_name,
                         )
 
-                    zip_name = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
                     folder = f.get("folder")
-                    if folder:
-                        safe_folder = str(folder).replace('/', '_').replace('\\', '_')
-                        zip_name = f"{safe_folder}/{zip_name}"
-                    entries.append((zip_name, pdf_bytes))
+                    if merge:
+                        rendered.append((folder or "", pdf_bytes))
+                    else:
+                        zip_name = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
+                        if folder:
+                            safe_folder = str(folder).replace('/', '_').replace('\\', '_')
+                            zip_name = f"{safe_folder}/{zip_name}"
+                        entries.append((zip_name, pdf_bytes))
                 except Exception as e:
                     log.warning("Bulk file PDF: skip %d: %s", i, e)
                     failed += 1
                 finally:
                     if progress_callback:
                         progress_callback(i + 1, len(files))
+
+            if merge:
+                if not rendered:
+                    return False, "No pages generated", None
+
+                # Grup per folder (sektor). Sama seperti jalur config:
+                #  - ada folder & >1 grup → ZIP berisi 1 PDF-gabungan per sektor
+                #  - selain itu           → 1 PDF gabungan datar
+                groups = collections.defaultdict(list)
+                for folder, pb in rendered:
+                    groups[folder].append(pb)
+                use_zip = any(folder for folder, _ in rendered) and len(groups) > 1
+
+                if not use_zip:
+                    merged = fitz.open()
+                    for _, pb in rendered:
+                        single = fitz.open("pdf", pb)
+                        merged.insert_pdf(single)
+                        single.close()
+                    total = len(merged)
+                    pdf_path = self.output_dir / f"{file_name}.pdf"
+                    merged.save(str(pdf_path))
+                    merged.close()
+                    msg = f"Generated {total} pages"
+                    if failed:
+                        msg += f" ({failed} skipped)"
+                    return True, msg, pdf_path
+
+                zip_path = self.output_dir / f"{file_name}.zip"
+                with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
+                    for folder, pbs in groups.items():
+                        merged = fitz.open()
+                        for pb in pbs:
+                            single = fitz.open("pdf", pb)
+                            merged.insert_pdf(single)
+                            single.close()
+                        safe_folder = str(folder).replace('/', '_').replace('\\', '_') or "Tanpa_Sektor"
+                        zf.writestr(f"{safe_folder}.pdf", merged.tobytes())
+                        merged.close()
+                msg = f"Generated {len(rendered)} pages in {len(groups)} folders"
+                if failed:
+                    msg += f" ({failed} skipped)"
+                return True, msg, zip_path
 
             if not entries:
                 return False, "No files generated", None

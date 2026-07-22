@@ -487,24 +487,79 @@ def force_monochrome(doc) -> None:
 # OLE2FRAME overlay
 # ---------------------------------------------------------------------------
 
-def collect_ole_frames(doc) -> List[Dict]:
-    """Return list of OLE2FRAME bounding boxes in modelspace, sorted top-down
-    (highest mm-Y first) and re-indexed 1..N. Each entry: ``{idx, handle,
-    descr, x1, x2, y1, y2}`` (mm)."""
-    rows: List[Dict] = []
-    for e in doc.modelspace().query("OLE2FRAME"):
-        descr, ul, lr = "", None, None
+def _ole2frame_corners(e) -> Optional[tuple]:
+    """Ambil (ul, lr) corner points sebuah OLE2FRAME dari XDATA-nya.
+    None bila tak lengkap."""
+    ul = lr = None
+    try:
         for tag in e.acdb_ole2frame:
-            if tag.code == 3:
-                descr = tag.value
-            elif tag.code == 10:
+            if tag.code == 10:
                 ul = tag.value
             elif tag.code == 11:
                 lr = tag.value
-        if ul and lr:
-            rows.append(dict(handle=e.dxf.handle, descr=descr,
-                             x1=min(ul[0], lr[0]), x2=max(ul[0], lr[0]),
-                             y1=min(ul[1], lr[1]), y2=max(ul[1], lr[1])))
+    except Exception:
+        return None
+    return (ul, lr) if (ul and lr) else None
+
+
+def collect_ole_frames(doc) -> List[Dict]:
+    """Return list of OLE2FRAME bounding boxes, sorted top-down (highest mm-Y
+    first) and re-indexed 1..N. Each entry: ``{idx, handle, descr, x1, x2, y1,
+    y2}`` (mm).
+
+    Mencari OLE2FRAME baik yang LANGSUNG di modelspace maupun yang berada di
+    DALAM block yang di-INSERT (sebagian drafter membungkus kop/logo dalam
+    block, mis. "template typical ..."). Untuk yang di dalam block, koordinat
+    corner ditransformasi ke WCS lewat matrix INSERT — kalau tidak, logo tak
+    terdeteksi dan tak ter-stamp (logo "hilang")."""
+    rows: List[Dict] = []
+    msp = doc.modelspace()
+
+    # 1. OLE2FRAME langsung di modelspace.
+    for e in msp.query("OLE2FRAME"):
+        corners = _ole2frame_corners(e)
+        if corners is None:
+            continue
+        ul, lr = corners
+        rows.append(dict(
+            handle=e.dxf.handle, descr="",
+            x1=min(ul[0], lr[0]), x2=max(ul[0], lr[0]),
+            y1=min(ul[1], lr[1]), y2=max(ul[1], lr[1]),
+        ))
+
+    # 2. OLE2FRAME di dalam block yang di-INSERT. Transformasi corner ke WCS
+    #    memakai matrix transform milik INSERT (posisi + skala + rotasi).
+    for ins in msp.query("INSERT"):
+        try:
+            block = doc.blocks.get(ins.dxf.name)
+        except Exception:
+            block = None
+        if block is None:
+            continue
+        if not any(be.dxftype() == "OLE2FRAME" for be in block):
+            continue
+        try:
+            m = ins.matrix44()
+        except Exception:
+            continue
+        for be in block:
+            if be.dxftype() != "OLE2FRAME":
+                continue
+            corners = _ole2frame_corners(be)
+            if corners is None:
+                continue
+            ul, lr = corners
+            try:
+                p1 = m.transform((ul[0], ul[1], 0))
+                p2 = m.transform((lr[0], lr[1], 0))
+            except Exception:
+                continue
+            rows.append(dict(
+                handle=be.dxf.handle, descr="",
+                x1=min(p1[0], p2[0]), x2=max(p1[0], p2[0]),
+                y1=min(p1[1], p2[1]), y2=max(p1[1], p2[1]),
+            ))
+
     rows.sort(key=lambda f: -f["y2"])
     for i, row in enumerate(rows, start=1):
         row["idx"] = i
