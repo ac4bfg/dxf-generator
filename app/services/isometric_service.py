@@ -8,6 +8,17 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.services.isometric_engine import IsometricEngine, VARIANT_DIRECTIONS, VARIANT_SCALE
 
 
+def _safe_zip_folder(folder: Optional[str]) -> str:
+    """Sanitasi path folder untuk entri ZIP, MEMPERTAHANKAN '/' sebagai
+    separator nested (mis. "28-01-2026/Sektor_X"). Hanya backslash & spasi
+    ganda tiap komponen yang dibersihkan; komponen kosong dibuang."""
+    if not folder:
+        return ""
+    parts = [p.replace('\\', '_').strip() for p in str(folder).split('/')]
+    parts = [p for p in parts if p]
+    return '/'.join(parts)
+
+
 class IsometricService:
     # Pre-rendered crossing block PDFs — keyed by "{template_path}::{start_block}".
     # Only 4 entries max (one per SR start_block variant), each ~20-50 KB.
@@ -375,7 +386,7 @@ class IsometricService:
                         
                         if len(merged) > 0:
                             total_pages += len(merged)
-                            safe_folder = folder.replace('/', '_').replace('\\', '_') if folder else "Tanpa_Sektor"
+                            safe_folder = _safe_zip_folder(folder) or "Tanpa_Sektor"
                             
                             fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
                             os.close(fd)
@@ -420,7 +431,7 @@ class IsometricService:
                     zip_name  = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
                     folder    = item.get("folder")
                     if folder:
-                        safe_folder = folder.replace('/', '_').replace('\\', '_')
+                        safe_folder = _safe_zip_folder(folder)
                         zip_name = f"{safe_folder}/{zip_name}"
                     entries.append((zip_name, pdf_bytes))
                 except Exception as e:
@@ -520,7 +531,7 @@ class IsometricService:
                     else:
                         zip_name = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
                         if folder:
-                            safe_folder = str(folder).replace('/', '_').replace('\\', '_')
+                            safe_folder = _safe_zip_folder(folder)
                             zip_name = f"{safe_folder}/{zip_name}"
                         entries.append((zip_name, pdf_bytes))
                 except Exception as e:
@@ -565,7 +576,7 @@ class IsometricService:
                             single = fitz.open("pdf", pb)
                             merged.insert_pdf(single)
                             single.close()
-                        safe_folder = str(folder).replace('/', '_').replace('\\', '_') or "Tanpa_Sektor"
+                        safe_folder = _safe_zip_folder(folder) or "Tanpa_Sektor"
                         zf.writestr(f"{safe_folder}.pdf", merged.tobytes())
                         merged.close()
                 msg = f"Generated {len(rendered)} pages in {len(groups)} folders"
@@ -621,7 +632,7 @@ class IsometricService:
             with _zipfile.ZipFile(str(zip_path), 'w', _zipfile.ZIP_DEFLATED) as zf:
                 for fp, folder in generated:
                     if folder:
-                        safe_folder = folder.replace('/', '_').replace('\\', '_')
+                        safe_folder = _safe_zip_folder(folder)
                         arcname = f"{safe_folder}/{fp.name}"
                     else:
                         arcname = fp.name
