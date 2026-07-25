@@ -150,6 +150,36 @@ def _fix_middlecenter_mtext(entity, doc) -> None:
     entity.dxf.attachment_point = 4
 
 
+# MTEXT alignment code "\A0;" / "\A1;" / "\A2;" (vertical align). AutoCAD
+# dimension text menyimpan angka sebagai "\A1;<value>". Kode ini bikin ezdxf
+# MENGABAIKAN oblique slant dari style → angka ter-render TEGAK. Config sistem
+# menulis angka polos (tanpa \A;) → miring. Jadi cukup strip prefix ini agar
+# angka dimensi DWG manual ikut miring, sama seperti config.
+_MTEXT_ALIGN_CODE_RE = re.compile(re.escape(chr(92) + 'A') + r'\d+;')
+
+
+def _strip_dim_align_codes(doc) -> None:
+    """Buang MTEXT alignment code (\\A0;/\\A1;/\\A2;) dari angka dimensi di
+    blok geometri anonim (*D.., *U..) supaya oblique slant dari style ISO-30
+    ikut ter-render (angka miring, bukan tegak).
+
+    Aman: no-op untuk drawing tanpa DIMENSION (drawing sistem menulis angka
+    polos). Hanya mengubah TEKS (alignment vertikal yang tak berdampak visual),
+    tak menyentuh geometri.
+    """
+    for block in doc.blocks:
+        name = block.name
+        if not (name.startswith('*D') or name.startswith('*U')
+                or name.startswith('*d') or name.startswith('*u')):
+            continue
+        for entity in block:
+            if entity.dxftype() != 'MTEXT':
+                continue
+            new_text = _MTEXT_ALIGN_CODE_RE.sub('', entity.text)
+            if new_text != entity.text:
+                entity.text = new_text
+
+
 def fix_mtext_for_ezdxf_render(doc) -> None:
     """Normalize MTEXT MiddleCenter entities so ezdxf renders them correctly.
 
@@ -166,16 +196,18 @@ def fix_mtext_for_ezdxf_render(doc) -> None:
     Call ONLY on a doc used exclusively for rendering (never for DXF/DWG
     saving), because it mutates the entities in place.
     """
+    # Fix DIMENSION text miring: angka ukur DWG manual disimpan sebagai
+    # MTEXT "\A1;<value>" di dalam blok geometri anonim (*D..). Prefix "\A1;"
+    # (alignment vertikal) membuat ezdxf MENGABAIKAN oblique slant style ISO-30
+    # → angka ter-render TEGAK. Config sistem menulis angka polos → miring.
+    # Buang prefix align code supaya angka DWG manual ikut miring.
+    _strip_dim_align_codes(doc)
+
     for entity in doc.modelspace().query('MTEXT'):
         _fix_middlecenter_mtext(entity, doc)
 
-    # Fix DIMENSION text: AutoCAD dimensions store their measurement text as
-    # MTEXT (attachment_point=5, MiddleCenter, "\A1;<value>") inside an
-    # anonymous geometry block (*D.., *U..). ezdxf renders the dimension via
-    # that block, but hits the same MiddleCenter-as-MiddleLeft bug — so the
-    # number sits off to the right of the dimension line unless corrected.
-    # System-generated drawings draw dimension text as plain modelspace MTEXT
-    # (0 real DIMENSION entities), so this only matters for manual AutoCAD DWGs.
+    # Koreksi posisi MiddleCenter untuk MTEXT dimensi di blok *D (angka DWG
+    # manual). Tanpa ini angka sedikit meleset dari garis dimensi.
     for block in doc.blocks:
         name = block.name
         if not (name.startswith('*D') or name.startswith('*U')
