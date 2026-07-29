@@ -8,6 +8,111 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.services.isometric_engine import IsometricEngine, VARIANT_DIRECTIONS, VARIANT_SCALE
 
 
+class _FileRenderTimeout(Exception):
+    """Ditimbulkan saat render satu file melewati batas waktu (deteksi hang)."""
+
+
+def _render_one_file_worker(raw: bytes, ext: str, template_path: str,
+                            oda_path: str, dwg_version: str,
+                            font_dir: str, logo_dir, layout_name: str) -> bytes:
+    """Konversi+render SATU file → PDF bytes. Dijalankan di PROSES TERPISAH
+    (ProcessPoolExecutor) supaya bisa di-KILL bila hang. Harus top-level &
+    picklable (tak boleh closure/instance method)."""
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    import ezdxf as _ezdxf
+
+    from app.services.dxf_service import DxfService
+    from app.services.pdf_renderer import render_doc_to_pdf_bytes
+
+    with _tempfile.TemporaryDirectory() as tmp_dir:
+        src = _Path(tmp_dir) / f"upload{ext}"
+        src.write_bytes(raw)
+        if ext == ".dwg":
+            dxf_svc = DxfService(template_path=template_path, output_path=tmp_dir,
+                                 oda_path=oda_path or "", dwg_version=dwg_version)
+            ok, msg, dxf_path = dxf_svc.convert_to_dxf(src, output_dir=_Path(tmp_dir))
+            if not ok or not dxf_path:
+                raise ValueError(msg)
+            doc = _ezdxf.readfile(str(dxf_path))
+        else:
+            doc = _ezdxf.readfile(str(src))
+
+        return render_doc_to_pdf_bytes(
+            doc, font_dir=_Path(font_dir),
+            logo_dir=_Path(logo_dir) if logo_dir else None,
+            layout_name=layout_name,
+        )
+
+
+class _RenderPool:
+    """ProcessPool 1-worker yang DI-REUSE antar file dalam satu bulk job.
+
+    Kenapa reuse: tiap spawn ProcessPool baru harus meng-import ezdxf +
+    matplotlib + service (~2.4s) — untuk ratusan file itu menumpuk jadi
+    menit. Dengan pool persisten, child hidup terus & import terjadi SEKALI.
+
+    Tetap killable: bila satu file HANG (fut.result timeout), child yang
+    macet di-kill paksa lalu pool di-recreate untuk file berikutnya — jadi
+    isolasi killable per-file tetap ada tanpa overhead spawn tiap file.
+    """
+
+    def __init__(self):
+        import concurrent.futures as _cf
+        self._cf = _cf
+        self._ex = None
+
+    def _ensure(self):
+        if self._ex is None:
+            self._ex = self._cf.ProcessPoolExecutor(max_workers=1)
+        return self._ex
+
+    def render(self, f, *, service, font_dir, logo_dir, layout_name,
+               timeout_seconds: int) -> bytes:
+        fname = str(f.get("filename") or "upload.dwg")
+        ext = Path(fname.lower()).suffix
+        raw = f.get("bytes")
+        if not raw or ext not in (".dwg", ".dxf"):
+            raise ValueError(f"file tidak valid: {fname}")
+
+        ex = self._ensure()
+        fut = ex.submit(
+            _render_one_file_worker, raw, ext, str(service.template_path),
+            service.oda_path or "", service.dwg_version,
+            str(font_dir), str(logo_dir) if logo_dir else None, layout_name,
+        )
+        try:
+            return fut.result(timeout=timeout_seconds)
+        except self._cf.TimeoutError:
+            # Child macet: kill paksa & buang pool ini supaya file macet tak
+            # menahan interpreter. Pool baru dibuat lazily di file berikutnya.
+            self._kill()
+            raise _FileRenderTimeout(f"render timeout {timeout_seconds}s: {fname}")
+        except self._cf.process.BrokenProcessPool:
+            # Child mati tak terduga (mis. OOM/segfault) — recreate pool lalu
+            # laporkan sebagai error file ini agar di-skip, job lanjut.
+            self._kill()
+            raise ValueError(f"render crash (broken pool): {fname}")
+
+    def _kill(self):
+        if self._ex is None:
+            return
+        for proc in list(getattr(self._ex, "_processes", {}).values()):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            self._ex.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        self._ex = None
+
+    def close(self):
+        self._kill()
+
+
 def _safe_zip_folder(folder: Optional[str]) -> str:
     """Sanitasi path folder untuk entri ZIP, MEMPERTAHANKAN '/' sebagai
     separator nested (mis. "28-01-2026/Sektor_X"). Hanya backslash & spasi
@@ -495,35 +600,21 @@ class IsometricService:
         # rendered: (folder, pdf_bytes) untuk mode merge (di-grup nanti).
         entries: List[tuple] = []
         rendered: List[tuple] = []
+        # Pool render DI-REUSE antar file (import ezdxf/matplotlib sekali, bukan
+        # tiap file). Tetap killable per-file saat hang (lihat _RenderPool).
+        pool = _RenderPool()
         try:
             for i, f in enumerate(files):
                 if cancel_check and cancel_check():
                     return False, "Cancelled", None
                 try:
                     reff_id = str(f.get("reff_id") or f"file_{i}")
-                    fname = str(f.get("filename") or "upload.dwg")
-                    ext = Path(fname.lower()).suffix
-                    raw = f.get("bytes")
-                    if not raw or ext not in (".dwg", ".dxf"):
-                        raise ValueError(f"file tidak valid: {fname}")
-
-                    with tempfile.TemporaryDirectory() as tmp_dir:
-                        src = Path(tmp_dir) / f"upload{ext}"
-                        src.write_bytes(raw)
-                        if ext == ".dwg":
-                            dxf_svc = DxfService(template_path=str(self.template_path),
-                                                 output_path=tmp_dir, oda_path=self.oda_path or "",
-                                                 dwg_version=self.dwg_version)
-                            ok, msg, dxf_path = dxf_svc.convert_to_dxf(src, output_dir=Path(tmp_dir))
-                            if not ok or not dxf_path:
-                                raise ValueError(msg)
-                            doc = _ezdxf.readfile(str(dxf_path))
-                        else:
-                            doc = _ezdxf.readfile(str(src))
-
-                        pdf_bytes = render_doc_to_pdf_bytes(
-                            doc, font_dir=font_dir, logo_dir=logo_dir, layout_name=layout_name,
-                        )
+                    # HARD TIMEOUT per-file: satu DWG yang bikin render/konversi
+                    # HANG tak boleh membuat seluruh bulk job macet → di-skip.
+                    pdf_bytes = pool.render(
+                        f, service=self, font_dir=font_dir, logo_dir=logo_dir,
+                        layout_name=layout_name, timeout_seconds=90,
+                    )
 
                     folder = f.get("folder")
                     if merge:
@@ -534,6 +625,9 @@ class IsometricService:
                             safe_folder = _safe_zip_folder(folder)
                             zip_name = f"{safe_folder}/{zip_name}"
                         entries.append((zip_name, pdf_bytes))
+                except _FileRenderTimeout as e:
+                    log.warning("Bulk file PDF: TIMEOUT skip %d: %s", i, e)
+                    failed += 1
                 except Exception as e:
                     log.warning("Bulk file PDF: skip %d: %s", i, e)
                     failed += 1
@@ -599,6 +693,8 @@ class IsometricService:
         except Exception as e:
             log.error("Bulk file PDF generation error: %s", e)
             return False, str(e), None
+        finally:
+            pool.close()
 
     def generate_bulk_dwg(self, items: List[Dict[str, Any]], file_name: str, progress_callback=None, cancel_check=None) -> Tuple[bool, str, Optional[Path]]:
         import logging
