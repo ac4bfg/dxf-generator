@@ -1,0 +1,79 @@
+name: Deploy DXF Generator (Sleman)
+
+# Server terpisah dari deploy.yml (aergas-prod) — instance mandiri di
+# 103.67.244.230, port 8099 lokal (bukan tunnel ke prod lagi, lihat
+# systemd unit apbn-nasional-tunnel yang cuma bawa MySQL nasional
+# sekarang). Trigger sama-sama push ke main karena satu repo dipakai
+# beberapa server independen (pola sama dengan Aergas-APBN/master-sleman).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile app/main.py
+          python -m py_compile app/config.py
+          python -m py_compile app/routes/dxf.py
+          python -m py_compile app/routes/isometric.py
+          python -m py_compile app/services/dxf_service.py
+          python -m py_compile app/services/dxf_to_svg.py
+          python -m py_compile app/services/isometric_service.py
+          python -m py_compile app/services/isometric_engine.py
+          python -m py_compile app/services/pdf_renderer.py
+          python -m py_compile app/services/pdf_template_cache.py
+          python -m py_compile app/services/job_store.py
+
+      - name: Deploy to Sleman server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SLEMAN_SERVER_IP }}
+          username: ${{ secrets.SLEMAN_SERVER_USERNAME }}
+          key: ${{ secrets.SLEMAN_SSH_PRIVATE_KEY }}
+          timeout: 120s
+          script: |
+            cd /home/deploy/apps/dxf-generator
+
+            # Pull latest code (running as deploy user via SSH)
+            git pull origin main
+
+            # Install/update dependencies (venv owned by deploy)
+            source venv/bin/activate
+            pip install -r requirements.txt
+
+            # Pastikan direktori jobs ada dan writable (untuk file-based job state)
+            mkdir -p output/jobs
+            chmod 755 output/jobs
+
+            # Restart via NOPASSWD sudo (lihat /etc/sudoers.d/dxf-generator
+            # di server — cuma 2 command ini yang di-scope, bukan full sudo)
+            sudo systemctl restart dxf-generator
+            sleep 3
+
+            sudo systemctl status dxf-generator --no-pager
+
+            # Verify health endpoint (retry karena WORKERS=1 di server ini,
+            # startup sedikit lebih lambat dari prod yang WORKERS=4)
+            for i in 1 2 3; do
+              curl -sf http://localhost:8099/ && break
+              echo "Waiting for worker to start... ($i/3)"
+              sleep 2
+            done
