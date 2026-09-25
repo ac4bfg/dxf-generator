@@ -641,9 +641,21 @@ class IsometricService:
                 if cancel_check and cancel_check():
                     return False, "Cancelled", None
                 try:
-                    customer_data = item.get("customer_data")
+                    customer_data = item.get("customer_data") or {}
                     pdf_bytes = self.render_pdf_bytes_cached(item, customer_data)
-                    zip_name  = f"ASBUILT_{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
+                    # BUGFIX: reff_id was referenced here without ever being
+                    # defined in this scope, so every item raised NameError
+                    # and was silently counted as "failed" -- entries stayed
+                    # empty and the job always returned "No files generated"
+                    # even on success. Mirrors the working pattern used by
+                    # generate_bulk_file_pdf_zip below (reff_id from item,
+                    # falling back to index).
+                    reff_id = str(
+                        item.get("file_name")
+                        or customer_data.get("reff_id")
+                        or f"file_{i}"
+                    )
+                    zip_name  = f"{reff_id.replace(' ', '_').replace('/', '_')}.pdf"
                     folder    = item.get("folder")
                     if folder:
                         safe_folder = _safe_zip_folder(folder)
