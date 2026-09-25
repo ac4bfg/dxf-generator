@@ -37,14 +37,20 @@ PLACEHOLDER_RE = re.compile(r"\[[A-Z0-9_]+\]")
 _MTEXT_FMT_RE = re.compile(r'\\[A-Za-z~][^;]*;|\\P|\{|\}')
 MM_TO_PT = 72.0 / 25.4
 
-# Cache template content hashes so we read each file once per process.
-# Using content hash (not mtime) means the cache key is stable even when
-# the OS updates mtime without changing the file's actual content.
-_TEMPLATE_CONTENT_HASH: Dict[str, str] = {}
+# Cache template content hashes so we don't re-read+md5 a file on every
+# request. Keyed by (path, mtime) — NOT path alone — so a file that gets
+# REPLACED at the same path (admin uploads a new kop DXF, e.g.
+# SK_POLOS_p1.dxf, without a server restart) is detected via its changed
+# mtime and re-hashed, instead of silently reusing the OLD file's hash
+# forever for the life of the process. Old (path, mtime) entries are never
+# evicted, but each is tiny (12-char string) and distinct file replacements
+# are rare, so unbounded growth is not a practical concern.
+_TEMPLATE_CONTENT_HASH: Dict[tuple, str] = {}
 
 
 def _get_template_hash(template_path: Path) -> str:
-    key = str(template_path)
+    mtime = template_path.stat().st_mtime_ns
+    key = (str(template_path), mtime)
     if key not in _TEMPLATE_CONTENT_HASH:
         _TEMPLATE_CONTENT_HASH[key] = hashlib.md5(
             template_path.read_bytes()
@@ -211,6 +217,17 @@ def _combined_dim_signature(cd: Dict) -> Dict:
 # Placeholder extraction
 # ---------------------------------------------------------------------------
 
+#  [REFF_ID] appears TWICE per SK/SR template — once in the title block
+#  (Y ~227-254mm, near the top of an A3 sheet) and once as the drawing
+#  number bottom-right (Y ~5-9mm). Same literal key, so a single row in the
+#  admin "Posisi PDF" panel (offset/font_scale keyed by substring match on
+#  ph["text"]) would otherwise nudge BOTH at once. _REFF_ID_BAWAH_Y_MAX is
+#  a cutoff well below the title block's Y and well above the bottom
+#  drawing-number's Y for every template surveyed (SK default/Kendal, SR
+#  default/2/3/backup) — see extract_placeholder_entities().
+_REFF_ID_BAWAH_Y_MAX = 50.0
+
+
 def extract_placeholder_entities(doc) -> List[Dict[str, Any]]:
     """Walk the modelspace and return a list of placeholder TEXT/MTEXT
     descriptions. We deliberately skip the synthetic ``*Model_Space`` block
@@ -220,10 +237,16 @@ def extract_placeholder_entities(doc) -> List[Dict[str, Any]]:
         if e.dxftype() == "TEXT" and PLACEHOLDER_RE.search(e.dxf.text):
             d = e.dxf
             ap = d.get("align_point")
+            y = float(d.insert.y)
             items.append({
                 "kind": "TEXT",
                 "text": d.text,
-                "x": float(d.insert.x), "y": float(d.insert.y),
+                # offset_key — used ONLY to look up custom_offsets/
+                # custom_font_scale (never for value substitution, which
+                # always uses "text"). None means "use text itself", same
+                # as before this field existed.
+                "offset_key": "[REFF_ID_BAWAH]" if ("[REFF_ID]" in d.text and y < _REFF_ID_BAWAH_Y_MAX) else None,
+                "x": float(d.insert.x), "y": y,
                 "ax": float(ap.x) if ap else float(d.insert.x),
                 "ay": float(ap.y) if ap else float(d.insert.y),
                 "height": float(d.height),
@@ -241,10 +264,12 @@ def extract_placeholder_entities(doc) -> List[Dict[str, Any]]:
             plain_text = _MTEXT_FMT_RE.sub('', e.text).strip()
             if not PLACEHOLDER_RE.search(plain_text):
                 plain_text = e.text  # fallback: keep original if strip removed placeholder
+            y = float(d.insert.y)
             items.append({
                 "kind": "MTEXT",
                 "text": plain_text,
-                "x": float(d.insert.x), "y": float(d.insert.y),
+                "offset_key": "[REFF_ID_BAWAH]" if ("[REFF_ID]" in plain_text and y < _REFF_ID_BAWAH_Y_MAX) else None,
+                "x": float(d.insert.x), "y": y,
                 "height": float(d.char_height),
                 "width": float(d.width or 0),
                 "rotation": float(d.rotation or 0),
@@ -322,12 +347,68 @@ def _font_path_or_default(font_dir: Optional[Path], fontfile: str) -> Optional[s
     return str(candidate) if candidate.is_file() else None
 
 
-def _placeholder_offset(template_text: str) -> Tuple[float, float]:
-    """Return the (x, y) nudge (in fractions of font size) for a placeholder
-    by scanning its template text for any key in
-    :data:`PLACEHOLDER_OFFSETS`. Falls back to (0, 0) when no key matches.
+# In-process cache of pymupdf.Font objects, keyed by font file path — avoids
+# re-reading/re-parsing the TTF on every _stamp_text()/_word_wrap_lines()
+# call within a single render (there can be dozens of placeholders per page).
+_FONT_OBJ_CACHE: Dict[str, Any] = {}
+
+
+def _get_font_obj(font_path: Optional[str]):
+    """Return a pymupdf.Font for `font_path`, or None if unavailable.
+
+    IMPORTANT: page.get_text_length() does NOT exist in PyMuPDF 1.28 (the
+    version pinned here) — calling it always raises AttributeError, which
+    every caller silently caught and replaced with a crude `len(text) *
+    fontsize * 0.5` estimate. That estimate is self-consistent for the
+    anchor-position MATH (anchor_x = x_pt - text_width always makes
+    anchor_x + text_width == x_pt), but PyMuPDF's actual glyph rendering in
+    insert_text() uses the REAL proportional glyph widths — which differ
+    from the flat per-character estimate by an amount that depends on the
+    exact characters in the string. For right/center-aligned text this
+    showed up as visible drift (e.g. right-aligned "EA" after a material
+    quantity landing a few points off depending on how many digits the
+    quantity had) even though the anchor math itself was correct — the
+    width FED INTO that math was wrong. pymupdf.Font(fontfile=...).
+    text_length() is the correct API for a custom/embedded font in this
+    PyMuPDF version and returns the true glyph-based width.
     """
-    for key, offset in PLACEHOLDER_OFFSETS.items():
+    if not font_path:
+        return None
+    if font_path not in _FONT_OBJ_CACHE:
+        try:
+            import pymupdf as _pm
+            _FONT_OBJ_CACHE[font_path] = _pm.Font(fontfile=font_path)
+        except Exception:
+            _FONT_OBJ_CACHE[font_path] = None
+    return _FONT_OBJ_CACHE[font_path]
+
+
+def _text_width(text: str, fontsize: float, fontname: str,
+                font_obj=None) -> float:
+    """Accurate text width via pymupdf.Font.text_length() when `font_obj`
+    is available; falls back to the flat per-character estimate (used to be
+    the ONLY path — see _get_font_obj() docstring) only when the font
+    couldn't be loaded at all."""
+    if font_obj is not None:
+        try:
+            return font_obj.text_length(text, fontsize=fontsize)
+        except Exception:
+            pass
+    return len(text) * fontsize * 0.5
+
+
+def _placeholder_offset(template_text: str, custom: Optional[Dict[str, Tuple[float, float]]] = None) -> Tuple[float, float]:
+    """Return the (x, y) nudge (in fractions of font size) for a placeholder
+    by scanning its template text for any key in :data:`PLACEHOLDER_OFFSETS`.
+
+    ``custom`` — per-region overrides (AsbuiltPdfPlaceholderOffset, resolved
+    Laravel-side and passed through customer_data['pdf_offsets']) MERGED on
+    top of the hardcoded defaults, so a region overriding ONE key doesn't
+    lose the calibrated defaults for every other key. Falls back to (0, 0)
+    when no key matches either source.
+    """
+    merged = {**PLACEHOLDER_OFFSETS, **(custom or {})}
+    for key, offset in merged.items():
         if key in template_text:
             return offset
     return (0.0, 0.0)
@@ -336,6 +417,21 @@ def _placeholder_offset(template_text: str) -> Tuple[float, float]:
 def _placeholder_x_offset(template_text: str) -> float:
     """Backwards-compat shim — returns just the X component."""
     return _placeholder_offset(template_text)[0]
+
+
+def _font_scale(template_text: str, custom: Optional[Dict[str, float]] = None) -> float:
+    """Return the font_size_pt multiplier for a placeholder by scanning its
+    template text for any key in ``custom`` (AsbuiltPdfPlaceholderOffset.
+    font_scale, resolved Laravel-side). Unlike _placeholder_offset() there is
+    NO hardcoded default layer — a key absent from ``custom`` means 1.0
+    (unchanged, original DXF cap-height).
+    """
+    if not custom:
+        return 1.0
+    for key, scale in custom.items():
+        if key in template_text:
+            return scale
+    return 1.0
 
 
 # DXF font filename → PyMuPDF font alias + filename. Order in this list
@@ -374,11 +470,17 @@ _DXF_HEIGHT_TO_PT = (72.0 / 25.4) / 0.716
 PLACEHOLDER_OFFSETS: Dict[str, Tuple[float, float]] = {
     # ---- Title block (TEXT entities, valign=2 Middle) ----
     "[REFF_ID]":            (0.0, -0.10),
+    # Bottom-right drawing number — same [REFF_ID] literal but a distinct
+    # entity (see _REFF_ID_BAWAH_Y_MAX/offset_key), default preserved
+    # identical to [REFF_ID] so existing renders don't shift; admin can
+    # override just this one from the "Posisi PDF" panel.
+    "[REFF_ID_BAWAH]":      (0.0, -0.10),
     "[NAMA]":               (-0.075, -0.10),
     "[SEKTOR]":             (0.0, -0.10),
     "[RT]":                 (0.0, -0.10),
     "[RW]":                 (0.0, -0.10),
     "[KELURAHAN]":          (0.0, -0.10),
+    "[PADUKUHAN]":          (0.0, -0.10),
     "[NO_MGRT]":            (0.0, -0.10),
     "[SN_AWAL]":            (0.0, -0.10),
     "[KOORDINAT_TAPPING]":  (0.0, -0.10),
@@ -398,6 +500,10 @@ PLACEHOLDER_OFFSETS: Dict[str, Tuple[float, float]] = {
     "[2]":  (-0.150, 0.0),  # elbow SK
     "[3]":  (-0.150, 0.0),  # sockdraft SK
     "[6]":  (-0.150, 0.0),  # klem SK
+    "[113]": (-0.150, 0.0),  # long elbow 3/4" male female SK
+    "[114]": (-0.150, 0.0),  # ball valve 1/2" SK
+    "[115]": (-0.150, 0.0),  # nipel selang 1/2" SK
+    "[4]":   (-0.150, 0.0),  # elbow reduce 3/4"x1/2" SK
 }
 
 
@@ -410,17 +516,38 @@ def compose_customer_pdf(skeleton_bytes: bytes,
                          replacements: Dict[str, str],
                          page_height_mm: float,
                          font_dir: Optional[Path] = None,
-                         crossing_overlay_bytes: Optional[bytes] = None) -> bytes:
+                         crossing_overlay_bytes: Optional[bytes] = None,
+                         logo_overlays: Optional[List[Dict[str, Any]]] = None,
+                         custom_offsets: Optional[Dict[str, Tuple[float, float]]] = None,
+                         custom_font_scale: Optional[Dict[str, float]] = None) -> bytes:
     """Open the skeleton PDF, stamp each placeholder's resolved text at the
     recorded position, return new PDF bytes. Pure in-memory, no disk I/O.
+
+    custom_offsets — per-region PLACEHOLDER_OFFSETS override (AsbuiltPdfPlaceholderOffset,
+    resolved Laravel-side, merged on top of the hardcoded defaults per-key —
+    see _placeholder_offset()). None/empty = identical to current behavior.
+
+    custom_font_scale — per-region font size multiplier keyed the same way
+    (AsbuiltPdfPlaceholderOffset.font_scale, resolved Laravel-side). Unlike
+    custom_offsets there is NO hardcoded default layer — a key absent here
+    means 1.0 (unchanged, original DXF cap-height). None/empty = identical
+    to current behavior.
 
     crossing_overlay_bytes — pre-rendered PDF of just the crossing block for
     this start_block variant. When supplied (customer has casing > 0), it is
     blended onto the skeleton *before* text so it sits in the geometry layer.
     Only 4 such overlays exist (one per start_block); each is ~20–50 KB and
     cached in IsometricService._CROSSING_OVERLAY_CACHE.
+
+    logo_overlays — per-region logo PNGs from As Built settings
+    (asbuilt_dxf_templates.logo_overlays), list of {png_base64, x1, y1, x2,
+    y2} (mm, DXF Y-up). Stamped on the SKELETON (already-cached geometry),
+    NEVER baked into the skeleton itself — this must stay outside the cache
+    key/skeleton build (render_pdf_bytes_cached's logo_dir=self._pdf_logo_dir()
+    stays global/region-agnostic there) or region A's logo would leak into
+    region B's cached skeleton for the same geometry.
     """
-    if not placeholders and crossing_overlay_bytes is None:
+    if not placeholders and crossing_overlay_bytes is None and not logo_overlays:
         return skeleton_bytes
 
     import pymupdf as _pm
@@ -474,9 +601,39 @@ def compose_customer_pdf(skeleton_bytes: bytes,
                 print(f"[WARNING] Crossing overlay failed: {_e}")
         h_pt = page_height_mm * MM_TO_PT
 
+        # ── Logo overlays (per-region, from As Built settings) ──
+        # Same rect math as composite_ole_overlays_inplace_bytes (pdf_renderer.py):
+        # mm (DXF Y-up) -> pt (PDF Y-down from top), y flipped via h_pt - y*MM_TO_PT.
+        # insert_image() accepts raw bytes via stream=, no temp file needed.
+        for lo in (logo_overlays or []):
+            b64 = lo.get("png_base64")
+            if not b64:
+                continue
+            try:
+                import base64 as _b64
+                png_bytes = _b64.b64decode(b64)
+            except Exception:
+                continue
+            try:
+                x1, x2 = float(lo["x1"]), float(lo["x2"])
+                y1, y2 = float(lo["y1"]), float(lo["y2"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if x2 <= x1 or y2 <= y1:
+                continue
+            x0_pt = x1 * MM_TO_PT
+            x1_pt = x2 * MM_TO_PT
+            y0_pt = h_pt - y2 * MM_TO_PT
+            y1_pt = h_pt - y1 * MM_TO_PT
+            try:
+                page.insert_image(_pm.Rect(x0_pt, y0_pt, x1_pt, y1_pt), stream=png_bytes, keep_proportion=False)
+            except Exception as _e:
+                print(f"[WARNING] Logo overlay failed: {_e}")
+
         # Embed the first available customer-text font. Priority: arial.ttf
         # (matches DXF style resolution), falls back to ARIALN.TTF.
         used_alias: Optional[str] = None
+        used_font_obj = None
         for alias, fname in _OVERLAY_FONT_CANDIDATES:
             font_path = _font_path_or_default(font_dir, fname)
             if not font_path:
@@ -484,6 +641,7 @@ def compose_customer_pdf(skeleton_bytes: bytes,
             try:
                 page.insert_font(fontname=alias, fontfile=font_path)
                 used_alias = alias
+                used_font_obj = _get_font_obj(font_path)
                 break
             except Exception:
                 continue
@@ -498,10 +656,23 @@ def compose_customer_pdf(skeleton_bytes: bytes,
             y_pt = h_pt - ph["y"] * MM_TO_PT
 
             # Map DXF cap-height (mm) to PDF font size (em-square pt) so the
-            # rendered cap-height roughly matches AutoCAD's plot.
+            # rendered cap-height roughly matches AutoCAD's plot. Custom
+            # font_scale (admin, "Posisi PDF" panel) applies BEFORE the
+            # offset fractions are resolved to pt, so a nudge (e.g. -0.15em)
+            # stays proportionally correct at any scale — it was calibrated
+            # as a fraction of the rendered size, not the original one.
+            # offset_key disambiguates entities that share the same literal
+            # [KEY] (e.g. two [REFF_ID] instances — title block vs bottom-
+            # right drawing number) so each can get its own custom
+            # offset/scale from the admin panel. Falls back to "text" for
+            # every other placeholder (unchanged behavior).
+            lookup_text = ph.get("offset_key") or ph["text"]
             font_size_pt = max(ph["height"] * _DXF_HEIGHT_TO_PT, 4.0)
+            font_scale = _font_scale(lookup_text, custom_font_scale)
+            font_size_pt *= font_scale
 
-            x_offset_frac, y_offset_frac = _placeholder_offset(ph["text"])
+            is_custom = custom_offsets and any(k in lookup_text for k in custom_offsets)
+            x_offset_frac, y_offset_frac = _placeholder_offset(lookup_text, custom_offsets)
             x_offset_pt = x_offset_frac * font_size_pt
             y_offset_pt = y_offset_frac * font_size_pt
 
@@ -512,11 +683,26 @@ def compose_customer_pdf(skeleton_bytes: bytes,
                 if ph["halign"] in (1, 2, 4):
                     x_pt = ph["ax"] * MM_TO_PT
                     y_pt = h_pt - ph["ay"] * MM_TO_PT
-                # TEXT valign=2 (Middle) — empirically baseline ≈ y_pt aligns
-                # with the ezdxf-rendered labels in the title block.
-                baseline_y = y_pt + y_offset_pt
+                # PLACEHOLDER_OFFSETS' DEFAULT y-fraction was calibrated BY
+                # TRIAL against valign=2 (Middle) title-block text, where
+                # insert.y is the box's vertical CENTER, not the text
+                # baseline — the nudge compensates for that gap. A
+                # re-exploded/re-saved template (seen in practice:
+                # SK_POLOS_p1.dxf after AutoCAD copy/paste) can carry the
+                # SAME placeholder at valign=0 (Baseline), where insert.y IS
+                # ALREADY the baseline — applying the valign=2 DEFAULT there
+                # shifts text into the label above it, so it's skipped for
+                # valign!=2. A CUSTOM offset (admin explicitly set it via the
+                # "Posisi PDF" panel, is_custom=True) is a DELIBERATE nudge
+                # for THIS exact entity — it must always apply regardless of
+                # valign, otherwise admin adjustments on valign=0 templates
+                # (e.g. Kendal) silently do nothing (bug reported: Y offset
+                # had zero effect while X worked, because X had no such gate).
+                apply_y = is_custom or ph["valign"] == 2
+                baseline_y = y_pt + (y_offset_pt if apply_y else 0.0)
                 _stamp_text(page, x_pt + x_offset_pt, baseline_y, value,
-                            font_size_pt, ph["rotation"], halign, used_alias)
+                            font_size_pt, ph["rotation"], halign, used_alias,
+                            used_font_obj)
             else:  # MTEXT
                 ap = ph["attachment_point"]
                 halign = _MTEXT_AP_HALIGN.get(ap, 0)
@@ -531,6 +717,7 @@ def compose_customer_pdf(skeleton_bytes: bytes,
                         y_pt + y_offset_pt,
                         value, font_size_pt,
                         mtext_width, ap, halign, used_alias,
+                        used_font_obj,
                     )
                 else:
                     # MTEXT width=0 (single-line, no wrapping) — keep existing path.
@@ -546,7 +733,8 @@ def compose_customer_pdf(skeleton_bytes: bytes,
                         baseline_y = y_pt
                     _stamp_text(page, x_pt + x_offset_pt, baseline_y + y_offset_pt,
                                 value, font_size_pt,
-                                ph["rotation"], halign, used_alias)
+                                ph["rotation"], halign, used_alias,
+                                used_font_obj)
 
         return pdf.tobytes(garbage=3, deflate=True)
     finally:
@@ -554,7 +742,8 @@ def compose_customer_pdf(skeleton_bytes: bytes,
 
 
 def _stamp_text(page, x_pt: float, y_pt: float, text: str, size: float,
-                rotation: float, halign: int, font_alias: Optional[str]) -> None:
+                rotation: float, halign: int, font_alias: Optional[str],
+                font_obj=None) -> None:
     """Stamp a single line at the given PDF-point position.
 
     Uses `insert_text` (not insert_textbox) so long strings — like
@@ -562,17 +751,16 @@ def _stamp_text(page, x_pt: float, y_pt: float, text: str, size: float,
     happens to be too narrow. We compute string width manually so we can
     still honor halign (CENTER / RIGHT shift the anchor by half / full
     width).
-    """
-    import pymupdf as _pm
 
+    font_obj — pymupdf.Font for `font_alias` (see _get_font_obj()), used for
+    an ACCURATE text_length(). Left/top-anchored text (halign=0) never
+    needed this — only center/right alignment does, since the anchor must
+    shift by the text's true rendered width for the visible edge to land
+    exactly on x_pt (see _get_font_obj() docstring for why the old
+    page.get_text_length() fallback silently drifted here).
+    """
     fontname = font_alias or "helv"
-    # Compute text width in PDF points so we can offset for non-left aligns.
-    try:
-        text_width = page.get_text_length(text, fontsize=size, fontname=fontname)
-    except Exception:
-        # get_text_length needs the font registered; for the built-in
-        # "helv" it always works. Estimate as fallback.
-        text_width = len(text) * size * 0.5
+    text_width = _text_width(text, size, fontname, font_obj)
 
     if halign == 1:    # center
         anchor_x = x_pt - text_width / 2
@@ -595,18 +783,25 @@ def _stamp_text(page, x_pt: float, y_pt: float, text: str, size: float,
 
 
 def _word_wrap_lines(page, text: str, fontsize: float,
-                     width_pt: float, fontname: str) -> List[str]:
-    """Word-wrap text into a list of lines fitting within width_pt."""
-    try:
+                     width_pt: float, fontname: str,
+                     font_obj=None) -> List[str]:
+    """Word-wrap text into a list of lines fitting within width_pt.
+
+    font_obj — see _get_font_obj()/_text_width(); without it this falls
+    back to a flat character-width estimate, which can wrap a line too
+    early or too late since it doesn't know the real (proportional) glyph
+    widths.
+    """
+    if font_obj is not None:
         words = text.split()
         if not words:
             return [""]
-        space_w = page.get_text_length(" ", fontsize=fontsize, fontname=fontname)
+        space_w = _text_width(" ", fontsize, fontname, font_obj)
         lines: List[str] = []
         current: List[str] = []
         current_w = 0.0
         for word in words:
-            word_w = page.get_text_length(word, fontsize=fontsize, fontname=fontname)
+            word_w = _text_width(word, fontsize, fontname, font_obj)
             if not current:
                 current.append(word)
                 current_w = word_w
@@ -620,9 +815,9 @@ def _word_wrap_lines(page, text: str, fontsize: float,
         if current:
             lines.append(" ".join(current))
         return lines or [""]
-    except Exception:
-        # get_text_length unavailable — estimate with fixed char width but
-        # still split on word boundaries, not arbitrary character positions.
+    else:
+        # No font_obj — estimate with fixed char width but still split on
+        # word boundaries, not arbitrary character positions.
         avg_char_w = fontsize * 0.65
         max_chars  = max(1, int(width_pt / avg_char_w))
         words      = text.split()
@@ -651,7 +846,7 @@ def _word_wrap_lines(page, text: str, fontsize: float,
 def _stamp_mtext_wrapped(page, x_pt: float, y_pt: float, text: str,
                          size: float, width_mm: float,
                          attachment_point: int, halign: int,
-                         font_alias: Optional[str]) -> None:
+                         font_alias: Optional[str], font_obj=None) -> None:
     """Stamp a word-wrapping MTEXT field line by line via _stamp_text.
 
     Renders each wrapped line with insert_text (same as single-line MTEXT)
@@ -670,7 +865,7 @@ def _stamp_mtext_wrapped(page, x_pt: float, y_pt: float, text: str,
     LINE_FACTOR = 1.25
     line_h_pt   = size * LINE_FACTOR
 
-    lines = _word_wrap_lines(page, text, size, width_pt, fontname)
+    lines = _word_wrap_lines(page, text, size, width_pt, fontname, font_obj)
     n = len(lines)
 
     # First-baseline y — mirrors the single-line MTEXT middle baseline (0.35).
@@ -685,7 +880,7 @@ def _stamp_mtext_wrapped(page, x_pt: float, y_pt: float, text: str,
 
     for i, line in enumerate(lines):
         _stamp_text(page, x_pt, first_y + i * line_h_pt,
-                    line, size, 0, halign, font_alias)
+                    line, size, 0, halign, font_alias, font_obj)
 
 
 # ---------------------------------------------------------------------------

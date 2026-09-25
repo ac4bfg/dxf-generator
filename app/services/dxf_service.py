@@ -58,6 +58,7 @@ class DxfService:
             "[RT]": request_data.get("rt", "-"),
             "[RW]": request_data.get("rw", "-"),
             "[KELURAHAN]": request_data.get("kelurahan", "-"),
+            "[PADUKUHAN]": request_data.get("padukuhan", "-"),
             "[SEKTOR]": request_data.get("sektor", "-"),
             "[NO_MGRT]": request_data.get("no_mgrt", "-"),
             "[SN_AWAL]": request_data.get("sn_awal", "-"),

@@ -71,13 +71,52 @@ INCOMPLETE_FONT_OVERRIDES: Dict[str, str] = {
 }
 
 #: File-level force-overrides applied even when the source file IS available.
+#: romans.shx -> romand.ttf as the DEFAULT (used by "ISO 30"/"ISO-30",
+#: actual dimension numbers).
 FORCE_FONT_OVERRIDES: Dict[str, str] = {
     "romans.shx": "romand.ttf",
 }
 
+#: STYLE-name-level force-overrides — checked BEFORE FORCE_FONT_OVERRIDES.
+#: "romans"/"ROMAND" (notes text, e.g. multi-line "GALVANIZE PIPE...") opt
+#: OUT of romand.ttf into romans.ttf instead: tried both TTF candidates
+#: side-by-side against native AutoCAD notes-text output —
+#:   - romand.ttf: glyph shapes (O/A roundness, letter spacing) matched
+#:     AutoCAD closer, but reads NATIVELY heavier/bolder than AutoCAD, even
+#:     with FAUX_BOLD_STYLES disabled for this style (weight difference is
+#:     baked into the font file itself, not the faux-bold offset-fill patch).
+#:   - romans.ttf: weight/thinness matches AutoCAD correctly, glyph shapes
+#:     are a bit more geometric/rounder than AutoCAD's native romans.shx —
+#:     an acceptable approximation, since no bundled TTF is a byte-identical
+#:     stand-in for the proprietary SHX shape font.
+#: Weight was judged the more visible defect of the two, so romans.ttf wins
+#: for "romans"/"ROMAND". "ISO 30"/"ISO-30" keep romand.ttf (unaffected —
+#: they're short, isolated dimension numbers where the weight difference is
+#: negligible and were never flagged as mismatched).
+STYLE_NAME_FONT_OVERRIDES: Dict[str, str] = {
+    "romans": "romans.ttf",
+    "ROMAND": "romans.ttf",
+}
+
 #: Faux-bold via 9-direction offset fills. Only applies to text in these
 #: DXF style names. Empty set disables.
-FAUX_BOLD_STYLES: Set[str] = {"ISO 30", "ISO-30", "romans"}
+#:
+#: "romans" REMOVED (was here for dimension-adjacent small labels like
+#: "PIPA PE Ø 20mm") — AutoCAD itself renders "romans" text un-bolded (see
+#: side-by-side comparison: sistem output vs native AutoCAD, "romans"-styled
+#: multi-line NOTES text came out visibly heavier than the source). Can't
+#: gate by char_height instead: "romans" text ranges from 0.33mm (SR pipe
+#: labels) to 1.9mm (SK notes), which OVERLAPS "ISO 30"/"ISO-30" dimension
+#: text (1.8-2.0mm) — no size threshold separates them. "ISO 30"/"ISO-30"
+#: (actual dimension numbers) keep the effect; that's the style this was
+#: originally tuned for.
+#:
+#: "ROMAND" ADDED back — now on top of romans.ttf (already the thin/correct
+#: weight, see STYLE_NAME_FONT_OVERRIDES above), trying faux-bold on top to
+#: compensate for the remaining glyph-shape gap vs AutoCAD's romans.shx.
+#: Different combo than the original "too bold" complaint, which was
+#: romand.ttf (natively heavier) + faux-bold stacked together.
+FAUX_BOLD_STYLES: Set[str] = {"ISO 30", "ISO-30", "ROMAND"}
 FAUX_BOLD_STROKE = 0.01
 
 #: Lineweight tuning.
@@ -343,12 +382,18 @@ def patch_styles(doc) -> None:
         if not font:
             continue
 
-        forced = (FORCE_FONT_OVERRIDES.get(font)
-                  or FORCE_FONT_OVERRIDES.get(font.lower()))
-        if forced and fonts.font_manager.has_font(forced):
-            if font != forced:
-                style.dxf.font = forced
-            font = forced
+        name_forced = STYLE_NAME_FONT_OVERRIDES.get(style.dxf.name)
+        if name_forced and fonts.font_manager.has_font(name_forced):
+            if font != name_forced:
+                style.dxf.font = name_forced
+            font = name_forced
+        else:
+            forced = (FORCE_FONT_OVERRIDES.get(font)
+                      or FORCE_FONT_OVERRIDES.get(font.lower()))
+            if forced and fonts.font_manager.has_font(forced):
+                if font != forced:
+                    style.dxf.font = forced
+                font = forced
 
         bare_name = "." not in font
         long_name = _style_long_name(style)

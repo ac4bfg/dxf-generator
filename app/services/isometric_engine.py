@@ -70,6 +70,13 @@ DIM_OVERRIDES = {
     "dimblk": "", "dimblk1": "_DOTSMALL", "dimblk2": "_DOTSMALL", "dimsah": 1,
 }
 
+# Arrow block names tried IN ORDER against the actual template — admins can
+# re-export/explode a kop template in AutoCAD and the arrow block can come
+# back under a different name (observed: "_DOTSMALL" -> "_DOT" after an
+# explode+re-save), which used to crash generate entirely
+# (DXFUndefinedBlockError) since DIM_OVERRIDES hardcoded one fixed name.
+_DIM_ARROW_BLOCK_CANDIDATES = ("_DOTSMALL", "_DOT", "_dotsmall", "_dot")
+
 BASE_BEND_RADIUS = 1.4
 
 # Auto-variant selection untuk smart blocks.
@@ -611,10 +618,19 @@ class IsometricEngine:
         dim_text = str(int(length_mm))
         # Render a temporary dim so ezdxf registers any required block definitions
         # (e.g. _DOTSMALL) and gives us a geometry block to harvest styling from.
+        # Arrow block name resolved against THIS doc's blocks table — see
+        # _DIM_ARROW_BLOCK_CANDIDATES comment (name can vary per template).
+        arrow_block = next(
+            (name for name in _DIM_ARROW_BLOCK_CANDIDATES if name in doc.blocks),
+            DIM_OVERRIDES["dimblk1"],
+        )
+        dim_overrides = DIM_OVERRIDES
+        if arrow_block != DIM_OVERRIDES["dimblk1"]:
+            dim_overrides = {**DIM_OVERRIDES, "dimblk1": arrow_block, "dimblk2": arrow_block}
         dimensi = msp.add_linear_dim(
             base=base, p1=p1, p2=p2, angle=dim_angle,
             text=dim_text, dimstyle=dimstyle_name,
-            dxfattribs={"layer": "DIM SK"}, override=DIM_OVERRIDES,
+            dxfattribs={"layer": "DIM SK"}, override=dim_overrides,
         )
         dimensi.render()
         dim_entity = dimensi.dimension
@@ -1232,8 +1248,18 @@ class IsometricEngine:
 
     def generate_svg_preview(self, request: Dict[str, Any],
                              customer_data: Optional[Dict[str, Any]] = None,
-                             font_dir=None) -> Tuple[bool, str]:
+                             font_dir=None,
+                             logo_overlays: Optional[List[Dict[str, Any]]] = None) -> Tuple[bool, str]:
         """Generate drawing in-memory + text-replace customer data + render to SVG.
+
+        logo_overlays — list of {png_path, x1?, y1?, x2?, y2?} (mm, DXF Y-up),
+        PNG already resolved to temp files by the caller (routes/isometric.py).
+        x1/y1/x2/y2 opsional per entry — kalau logo BELUM PERNAH digeser/resize
+        di editor As Built, entry itu belum punya posisi custom; di sini
+        di-fallback ke bounding box OLE2FRAME asli si file (idx harus ikut
+        dikirim di entry itu supaya bisa di-match ke frame yang benar) — TANPA
+        ini logo yang baru diupload tidak pernah muncul di preview.
+
         Returns (success, svg_string_or_error)."""
         try:
             # Pastikan customer_data tersedia di dalam request agar crossing block
@@ -1272,8 +1298,26 @@ class IsometricEngine:
             svc.process_modelspace(doc.modelspace(), replacements)
             svc.process_blocks(doc, replacements)
 
+            resolved_overlays = []
+            if logo_overlays:
+                from app.services.pdf_renderer import collect_ole_frames
+                frames_by_idx = None  # lazy — cuma dihitung kalau ada entry tanpa posisi
+                for ov in logo_overlays:
+                    if all(k in ov for k in ("x1", "y1", "x2", "y2")):
+                        resolved_overlays.append(ov)
+                        continue
+                    if frames_by_idx is None:
+                        frames_by_idx = {f["idx"]: f for f in collect_ole_frames(doc)}
+                    pos = frames_by_idx.get(ov.get("idx"))
+                    if not pos:
+                        continue
+                    resolved_overlays.append({
+                        "png_path": ov["png_path"],
+                        "x1": pos["x1"], "y1": pos["y1"], "x2": pos["x2"], "y2": pos["y2"],
+                    })
+
             from app.services.dxf_to_svg import render_dxf_to_svg
-            svg = render_dxf_to_svg(doc, font_dir=font_dir)
+            svg = render_dxf_to_svg(doc, font_dir=font_dir, logo_overlays=resolved_overlays)
             return True, svg
         except Exception as e:
             import traceback

@@ -2,6 +2,7 @@ import os
 import platform
 import shutil
 from pathlib import Path
+from typing import Optional
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -67,3 +68,18 @@ def is_oda_available() -> bool:
     if platform.system() == "Windows":
         return False
     return os.path.exists(settings.oda_path)
+
+
+def turunkan_path_per_project(base_path: str, project_id: Optional[int]) -> Path:
+    """Path template DXF per-region — 1 server fisik BISA melayani lebih
+    dari 1 project_id (mis. Batang+Kendal+Wajo di 1 mesin), jadi base_path
+    (dari .env, 1 path per server) TIDAK CUKUP kalau tiap region butuh kop
+    berbeda. project_id disisipkan sebagai suffix `_p{id}` sebelum ekstensi
+    — sama fungsi persis dengan Laravel-side turunkanPathPerProject()
+    (InternalAsbuiltSyncController) supaya kedua sisi selalu resolve nama
+    file YANG SAMA. project_id=None (default nasional) -> base_path apa
+    adanya, TIDAK ADA perubahan untuk kasus paling umum."""
+    p = Path(base_path)
+    if not project_id:
+        return p
+    return p.with_name(f"{p.stem}_p{project_id}{p.suffix}")

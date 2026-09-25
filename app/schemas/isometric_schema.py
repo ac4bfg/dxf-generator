@@ -165,6 +165,12 @@ class CombinedDim(BaseModel):
 
 class IsometricGenerateRequest(BaseModel):
     module: Literal["SR", "SK"] = "SR"
+    project_id: Optional[int] = Field(
+        None,
+        description="Region aktif (Laravel resolve) — 1 server fisik bisa "
+                    "melayani >1 project_id, dipakai pilih kop DXF per-region "
+                    "yang sudah di-setting di halaman As Built. None = default nasional.",
+    )
     start_block: Optional[str] = Field("start-BR", description="Start block variant. None/omit for SK (no anchor).")
     start_insert: Optional[Tuple[float, float]] = Field(
         None, description="Insert position. If None, auto-use variant default.")
@@ -175,6 +181,12 @@ class IsometricGenerateRequest(BaseModel):
     file_name: Optional[str] = Field(None, description="Output filename (without extension)")
     customer_data: Optional[Dict[str, Any]] = Field(None, description="Customer data for text replacement in template")
     sk_line_color: Optional[int] = Field(None, ge=1, le=256, description="Warna global LWPOLYLINE SK (ACI). Default: 5 (biru).")
+    logo_overlays: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Overlay gambar (mis. peta lokasi) untuk PDF/SVG compositing "
+                    "dan, jika format dxf/dwg, embed langsung ke entity OLE2FRAME. "
+                    "Tiap item: {idx, png_base64, x1?, y1?, x2?, y2?}.",
+    )
 
     class Config:
         json_schema_extra = {

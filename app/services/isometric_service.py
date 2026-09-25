@@ -170,6 +170,7 @@ class IsometricService:
             return False, msg, None
 
         self._apply_text_replacement(doc, customer_data)
+        self._embed_logo_overlays(doc, request.get("logo_overlays"))
         doc.saveas(str(dxf_path))
 
         if fmt == "dwg":
@@ -186,6 +187,78 @@ class IsometricService:
             return True, "Generated successfully", dwg_path
 
         return True, msg, dxf_path
+
+    def _embed_logo_overlays(self, doc, logo_overlays: Optional[List[Dict[str, Any]]]) -> None:
+        """Embed peta lokasi (dan overlay gambar lain) LANGSUNG ke entity
+        OLE2FRAME di file DXF/DWG mentah — jalur terpisah dari overlay
+        compositing PDF/SVG (yang menimpa hasil render, tidak menyentuh
+        entity DXF). Lihat app/services/ole_image_embed.py untuk detail
+        format OLE2FRAME/Compound Document.
+
+        Gagal per-item TIDAK menghentikan generate — file DXF/DWG tetap
+        dihasilkan tanpa peta (sama seperti sebelum fitur ini ada), cuma
+        di-log.
+        """
+        if not logo_overlays:
+            return
+
+        import base64
+        import logging
+        from app.services.ole_image_embed import apply_ole_image
+        from app.services.pdf_renderer import collect_ole_frames
+
+        logger = logging.getLogger(__name__)
+
+        template_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "assets" / "ole_templates" / "ole_map_template_1435x1517.bin"
+        )
+        if not template_path.is_file():
+            logger.warning("OLE embed template tidak ditemukan: %s", template_path)
+            return
+
+        try:
+            frames = collect_ole_frames(doc)
+        except Exception:
+            logger.exception("Gagal collect_ole_frames untuk embed logo_overlays")
+            return
+
+        frames_by_idx = {f["idx"]: f["handle"] for f in frames}
+        # OLE2FRAME bisa langsung di modelspace ATAU di dalam block definition
+        # (drafter kadang bungkus kop/logo dalam block) — collect_ole_frames()
+        # sudah tangani KEDUANYA untuk hitung posisi, jadi map handle->entity
+        # di sini juga harus cakup keduanya, kalau tidak entity nested tidak
+        # ketemu dan embed diam-diam di-skip.
+        ole_entities = {
+            e.dxf.handle: e for e in doc.modelspace() if e.dxftype() == "OLE2FRAME"
+        }
+        for block in doc.blocks:
+            for be in block:
+                if be.dxftype() == "OLE2FRAME":
+                    ole_entities.setdefault(be.dxf.handle, be)
+
+        for ov in logo_overlays:
+            idx = ov.get("idx")
+            handle = frames_by_idx.get(idx)
+            entity = ole_entities.get(handle) if handle else None
+            if entity is None:
+                continue
+            # Slot yang binary aslinya MASIH ADA ISI = logo statis tertanam
+            # sengaja (mis. logo kontraktor, rasio bebas, TIDAK dirancang
+            # untuk ukuran template embed ini). Cuma slot yang SUDAH
+            # di-strip kosong (0 byte) yang dianggap "siap ditimpa overlay
+            # dinamis" (mis. peta lokasi) — skip yang lain supaya tidak
+            # memaksa resize logo ke rasio template dan merusaknya.
+            if len(entity.binary_data()) > 0:
+                continue
+            png_b64 = ov.get("png_base64")
+            if not png_b64:
+                continue
+            try:
+                png_bytes = base64.b64decode(png_b64)
+                apply_ole_image(entity, png_bytes, template_path)
+            except Exception:
+                logger.exception("Gagal embed logo_overlay idx=%s handle=%s", idx, handle)
 
     def _generate_pdf(self, doc, output_path: Path) -> bool:
         """Render the in-memory Drawing to PDF using the production renderer
@@ -207,13 +280,19 @@ class IsometricService:
             return False
 
     def render_pdf_bytes(self, doc) -> bytes:
-        """In-memory PDF rendering for the preview endpoint."""
+        """In-memory PDF rendering — used by the non-cached fallback path
+        (render_pdf_bytes_cached() raised). No logo_dir: that was a global
+        overlay (assets/logo/drawing<idx>.png) baked in for EVERY region
+        with a matching OLE frame index, regardless of whether that region
+        actually wanted a logo there — region-specific logos belong to
+        logo_overlays (AsbuiltDxfTemplate, admin panel), which this
+        no-cache fallback doesn't currently apply at all (pre-existing gap,
+        not introduced by removing logo_dir here)."""
         self._fix_image_paths(doc)
         from app.services.pdf_renderer import render_doc_to_pdf_bytes
         return render_doc_to_pdf_bytes(
             doc,
             font_dir=self._pdf_font_dir(),
-            logo_dir=self._pdf_logo_dir(),
         )
 
     # ------------------------------------------------------------------
@@ -221,10 +300,17 @@ class IsometricService:
     # ------------------------------------------------------------------
 
     def render_pdf_bytes_cached(self, request: Dict[str, Any],
-                                customer_data: Optional[Dict] = None) -> bytes:
+                                customer_data: Optional[Dict] = None,
+                                logo_overlays: Optional[list] = None) -> bytes:
         """Fast-path PDF render using the per-(template, structure) skeleton
         cache. Geometry is rendered once per cache key; per-customer text
         is overlaid via PyMuPDF.
+
+        logo_overlays — per-region logo PNGs (As Built settings), overlaid
+        AFTER cache hit/miss via compose_customer_pdf(), NEVER passed to the
+        skeleton build below (that stays on the global _pdf_logo_dir()) —
+        the skeleton cache key doesn't include region, so baking a
+        region-specific logo into it would leak across regions on cache hit.
 
         Falls back transparently to the full ezdxf renderer if anything in
         the fast-path fails or if the request has no placeholders.
@@ -255,6 +341,13 @@ class IsometricService:
             oda_path=self.oda_path or "",
             dwg_version=self.dwg_version,
         )
+        # Per-region PLACEHOLDER_OFFSETS override (AsbuiltPdfPlaceholderOffset,
+        # resolved Laravel-side) — dict {key: [x, y]} or absent when the
+        # region has never overridden anything (falls back to hardcoded
+        # PLACEHOLDER_OFFSETS defaults, same as before this existed).
+        pdf_offsets = (customer_data or {}).get("pdf_offsets") or {}
+        pdf_font_scale = (customer_data or {}).get("pdf_font_scale") or {}
+
         if customer_data:
             replacements = dxf_svc.prepare_data(customer_data)
         else:
@@ -287,6 +380,9 @@ class IsometricService:
                 page_height_mm=page_h_mm,
                 font_dir=self._pdf_font_dir(),
                 crossing_overlay_bytes=crossing_bytes,
+                logo_overlays=logo_overlays,
+                custom_offsets=pdf_offsets,
+                custom_font_scale=pdf_font_scale,
             )
 
         # Miss → build skeleton (geometry only, placeholders filtered out)
@@ -299,11 +395,18 @@ class IsometricService:
         placeholders = extract_placeholder_entities(doc)
         page_h_mm = get_page_height_mm(doc, layout_name="SR")
 
+        # logo_dir SENGAJA TIDAK dipakai di sini — itu overlay GLOBAL
+        # (assets/logo/drawing<idx>.png), ter-bake permanen ke skeleton
+        # (di-cache, dipakai SEMUA region tanpa syarat) begitu file-nya ADA
+        # di disk, terlepas region yang generate. Region yang butuh logo
+        # kontraktor sekarang pakai logo_overlays (per-region, admin panel
+        # "Logo Preview"/AsbuiltDxfTemplate.logo_overlays) via
+        # compose_customer_pdf() di bawah — mekanisme itu sudah region-aware
+        # dan TIDAK ikut ter-cache ke skeleton (diterapkan per-request).
         from app.services.pdf_template_cache import _skip_placeholders_and_crossing
         skeleton_bytes = render_doc_to_pdf_bytes(
             doc,
             font_dir=self._pdf_font_dir(),
-            logo_dir=self._pdf_logo_dir(),
             filter_func=_skip_placeholders_and_crossing,
         )
         save_cache(cache_dir, key, skeleton_bytes, placeholders)
@@ -314,14 +417,20 @@ class IsometricService:
             page_height_mm=page_h_mm,
             font_dir=self._pdf_font_dir(),
             crossing_overlay_bytes=crossing_bytes,
+            logo_overlays=logo_overlays,
+            custom_offsets=pdf_offsets,
+            custom_font_scale=pdf_font_scale,
         )
 
     # Per-process small caches (cheap to recompute, but avoids repeated DXF
-    # re-read just to get the page height on cache hits).
-    _PAGE_HEIGHT_CACHE: Dict[str, float] = {}
+    # re-read just to get the page height on cache hits). Key includes mtime
+    # so an updated template file (kop diganti) auto-invalidates without a
+    # process restart — same pattern as _get_template_hash() in
+    # pdf_template_cache.py.
+    _PAGE_HEIGHT_CACHE: Dict[tuple, float] = {}
 
     def _cached_page_height_mm(self, template_path: Path) -> float:
-        key = str(template_path)
+        key = (str(template_path), template_path.stat().st_mtime_ns)
         if key in self._PAGE_HEIGHT_CACHE:
             return self._PAGE_HEIGHT_CACHE[key]
         # No cached value yet — read template once to determine it.
@@ -333,7 +442,8 @@ class IsometricService:
         return h
 
     def _cache_page_height(self, template_path: Path, h: float) -> None:
-        self._PAGE_HEIGHT_CACHE[str(template_path)] = h
+        key = (str(template_path), template_path.stat().st_mtime_ns)
+        self._PAGE_HEIGHT_CACHE[key] = h
 
     def _pdf_font_dir(self) -> Path:
         from app.config import get_settings
@@ -840,7 +950,6 @@ class IsometricService:
             overlay = render_doc_to_pdf_bytes(
                 doc,
                 font_dir=self._pdf_font_dir(),
-                logo_dir=self._pdf_logo_dir(),
                 filter_func=_skip_placeholders,
             )
 

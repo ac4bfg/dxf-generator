@@ -371,6 +371,21 @@ def render_dxf_to_svg(doc, paper_width_mm: float = PAPER_WIDTH_MM,
     sy = paper_height_mm / vb_h if vb_h else 1
 
     # Compute modelspace DXF bounding box for sketch coordinate calibration.
+    #
+    # Bounds candidates are clamped to the paper area + a tolerance margin
+    # BEFORE min/max — a stray leftover entity far outside the page (seen in
+    # practice: an "coupling2" INSERT block accidentally left at (-341, 953)
+    # after an AutoCAD explode/re-save, paper is 0-402 x 0-276) used to blow
+    # the whole bbox out to ~1100x950, which corrupts every downstream
+    # paper-mm <-> DXF-unit conversion in editor.blade.php (_realMmPerPaperMm,
+    # _paperMmToDxf) — drawn pipe geometry ends up scaled/positioned wildly
+    # wrong right after Selesai/save, even though live editing looked fine
+    # (live editing uses the ORIGINAL svg before this recalculation kicks in
+    # on the post-save re-render).
+    _margin = 0.5  # 50% of paper size on each side — generous for genuine kop content
+    _x_lo, _x_hi = -paper_width_mm * _margin, paper_width_mm * (1 + _margin)
+    _y_lo, _y_hi = -paper_height_mm * _margin, paper_height_mm * (1 + _margin)
+
     dxf_extent_x = 200.0; dxf_extent_y = 120.0
     dxf_min_x = 100.0;    dxf_min_y = 80.0
     try:
@@ -379,14 +394,17 @@ def render_dxf_to_svg(doc, paper_width_mm: float = PAPER_WIDTH_MM,
             try:
                 t = _e.dxftype()
                 if t == 'LINE':
-                    _xs += [_e.dxf.start.x, _e.dxf.end.x]
-                    _ys += [_e.dxf.start.y, _e.dxf.end.y]
+                    _pts = [(_e.dxf.start.x, _e.dxf.start.y), (_e.dxf.end.x, _e.dxf.end.y)]
                 elif t == 'LWPOLYLINE':
-                    _xs += [p[0] for p in _e.get_points()]
-                    _ys += [p[1] for p in _e.get_points()]
+                    _pts = [(p[0], p[1]) for p in _e.get_points()]
                 elif t == 'INSERT':
-                    _xs.append(_e.dxf.insert.x)
-                    _ys.append(_e.dxf.insert.y)
+                    _pts = [(_e.dxf.insert.x, _e.dxf.insert.y)]
+                else:
+                    continue
+                for _x, _y in _pts:
+                    if _x_lo <= _x <= _x_hi and _y_lo <= _y <= _y_hi:
+                        _xs.append(_x)
+                        _ys.append(_y)
             except Exception:
                 pass
         if _xs:
