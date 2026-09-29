@@ -127,6 +127,12 @@ def _fix_middlecenter_mtext(entity, doc) -> None:
     modelspace MTEXT and dimension geometry-block MTEXT (\\A1;<value>)."""
     if entity.dxf.get('attachment_point', 1) != 5:
         return
+    # MTEXT multi-baris dengan lebar kolom: ezdxf SUDAH menaruh tiap baris di
+    # tengah kolom dengan benar. Geser setengah lebar di sini justru salah
+    # (lebar dihitung dari semua baris digabung) — mis. judul proyek kop
+    # Sleman 3 baris jadi berantakan.
+    if chr(92) + 'P' in (entity.text or '') and float(entity.dxf.get('width', 0) or 0) > 0:
+        return
     char_ht  = float(entity.dxf.get('char_height', 2.5) or 2.5)
     rotation = float(entity.dxf.get('rotation', 0) or 0)
     td = entity.dxf.get('text_direction', None)
@@ -180,6 +186,24 @@ def _strip_dim_align_codes(doc) -> None:
                 entity.text = new_text
 
 
+# "\pq*;" = kembalikan perataan paragraf ke default. AutoCAD mengartikan
+# default itu mengikuti kolom attachment point MTEXT (kiri/tengah/kanan);
+# ezdxf selalu menganggapnya rata KIRI — baris setelah kode ini lari ke kiri
+# (mis. "TAHAP 3" di judul proyek kop Sleman).
+_PARA_DEFAULT_RE = re.compile(re.escape(chr(92) + 'pq*;'))
+_ATTACH_TO_PARA = {1: 'l', 4: 'l', 7: 'l', 2: 'c', 5: 'c', 8: 'c', 3: 'r', 6: 'r', 9: 'r'}
+
+
+def _resolve_default_paragraph_align(doc) -> None:
+    layouts = [doc.modelspace()] + [b for b in doc.blocks]
+    for layout in layouts:
+        for entity in layout:
+            if entity.dxftype() != 'MTEXT' or 'pq*;' not in (entity.text or ''):
+                continue
+            q = _ATTACH_TO_PARA.get(int(entity.dxf.get('attachment_point', 1) or 1), 'l')
+            entity.text = _PARA_DEFAULT_RE.sub(lambda _m: chr(92) + 'pxq' + q + ';', entity.text)
+
+
 def fix_mtext_for_ezdxf_render(doc) -> None:
     """Normalize MTEXT MiddleCenter entities so ezdxf renders them correctly.
 
@@ -202,6 +226,7 @@ def fix_mtext_for_ezdxf_render(doc) -> None:
     # → angka ter-render TEGAK. Config sistem menulis angka polos → miring.
     # Buang prefix align code supaya angka DWG manual ikut miring.
     _strip_dim_align_codes(doc)
+    _resolve_default_paragraph_align(doc)
 
     for entity in doc.modelspace().query('MTEXT'):
         _fix_middlecenter_mtext(entity, doc)
