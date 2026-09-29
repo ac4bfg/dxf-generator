@@ -605,8 +605,10 @@ async def preview_drawing_svg(
                 entry.update(x1=ov["x1"], y1=ov["y1"], x2=ov["x2"], y2=ov["y2"])
             logo_overlays.append(entry)
 
+        # SR auto_fit + casing: crossing ikut digambar & digeser bersama pipa.
+        req_svg, _ = service.siapkan_crossing_auto_fit(payload, customer_data)
         success, result = service.engine.generate_svg_preview(
-            payload, customer_data, font_dir=service._pdf_font_dir(), logo_overlays=logo_overlays
+            req_svg, customer_data, font_dir=service._pdf_font_dir(), logo_overlays=logo_overlays
         )
         if not success:
             raise ValueError(result)
@@ -672,15 +674,16 @@ async def preview_drawing_pdf(
         try:
             return service.render_pdf_bytes_cached(payload, customer_data, logo_overlays=logo_overlays)
         except Exception:
-            engine_req = {**payload, "customer_data": customer_data} if customer_data is not None else payload
+            req, dibake = service.siapkan_crossing_auto_fit(payload, customer_data)
+            engine_req = {**req, "customer_data": customer_data} if customer_data is not None else req
             success, msg, doc = service.engine.generate(engine_req, None)
             if not success:
                 raise ValueError(msg)
             service._apply_text_replacement(doc, customer_data)
             pdf_bytes = service.render_pdf_bytes(doc)
-            need_crossing = service._customer_has_casing(customer_data) or any(
+            need_crossing = not dibake and (service._customer_has_casing(customer_data) or any(
                 s.get("type") == "crossing" for s in payload.get("segments", [])
-            )
+            ))
             if need_crossing:
                 pdf_bytes = service.apply_crossing_overlay(
                     pdf_bytes, payload.get("start_block", "start-BR"), customer_data

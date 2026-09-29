@@ -165,6 +165,7 @@ class IsometricService:
                 return (True, "Generated successfully", pdf_path) if ok else (False, "PDF generation failed", None)
 
         dxf_path = self.output_dir / f"{base_name}.dxf"
+        request, _ = self.siapkan_crossing_auto_fit(request, customer_data)
         success, msg, doc = self.engine.generate(request, None)
         if not success:
             return False, msg, None
@@ -326,6 +327,7 @@ class IsometricService:
 
         template_path = self.template_path
         cache_dir = self.output_dir / "pdf_cache"
+        request, crossing_dibake = self.siapkan_crossing_auto_fit(request, customer_data)
         key = request_cache_key(
             template_path,
             request.get("start_block", "start-BR"),
@@ -366,9 +368,9 @@ class IsometricService:
         # Apply overlay when customer has casing OR segments had a crossing
         # type entry (custom drawing) — both cases use the same 4 cached bytes.
         start_block = request.get("start_block", "start-BR")
-        need_crossing = self._customer_has_casing(customer_data) or any(
+        need_crossing = not crossing_dibake and (self._customer_has_casing(customer_data) or any(
             s.get("type") == "crossing" for s in request.get("segments", [])
-        )
+        ))
         crossing_bytes = self._get_crossing_overlay(start_block) if need_crossing else None
 
         # Try cache hit first.
@@ -393,6 +395,8 @@ class IsometricService:
             raise RuntimeError(f"engine.generate failed: {msg}")
 
         self._fix_image_paths(doc)
+        if crossing_dibake:
+            self._fix_crossing_mtext_direction(doc, start_block)
         placeholders = extract_placeholder_entities(doc)
         page_h_mm = get_page_height_mm(doc, layout_name="SR")
 
@@ -404,11 +408,12 @@ class IsometricService:
         # "Logo Preview"/AsbuiltDxfTemplate.logo_overlays) via
         # compose_customer_pdf() di bawah — mekanisme itu sudah region-aware
         # dan TIDAK ikut ter-cache ke skeleton (diterapkan per-request).
-        from app.services.pdf_template_cache import _skip_placeholders_and_crossing
+        from app.services.pdf_template_cache import _skip_placeholders, _skip_placeholders_and_crossing
         skeleton_bytes = render_doc_to_pdf_bytes(
             doc,
             font_dir=self._pdf_font_dir(),
-            filter_func=_skip_placeholders_and_crossing,
+            # Crossing yang di-bake (auto_fit) tetap dirender di skeleton.
+            filter_func=_skip_placeholders if crossing_dibake else _skip_placeholders_and_crossing,
         )
         save_cache(cache_dir, key, skeleton_bytes, placeholders)
         self._cache_page_height(template_path, page_h_mm)
@@ -907,6 +912,24 @@ class IsometricService:
             return float(str(raw).replace(",", ".")) > 0
         except (ValueError, TypeError):
             return False
+
+    def siapkan_crossing_auto_fit(self, request: Dict[str, Any],
+                                  customer_data: Optional[Dict]) -> Tuple[Dict[str, Any], bool]:
+        """SR auto_fit + casing: blok crossing DIGAMBAR sebagai bagian gambar
+        (segmen "crossing"), bukan overlay PDF di posisi tetap — supaya ikut
+        digeser/diperkecil auto_fit bersama pipa (PDF, SVG, DXF/DWG).
+        Return (request baru, True) kalau crossing di-bake; auto_fit.crossing
+        ikut masuk kunci cache skeleton PDF."""
+        if request.get("auto_fit") is None or request.get("module") != "SR":
+            return request, False
+        segs = request.get("segments") or []
+        ada = any(s.get("type") == "crossing" for s in segs)
+        if not ada and not self._customer_has_casing(customer_data):
+            return request, False
+        baru = {**request, "auto_fit": {**(request.get("auto_fit") or {}), "crossing": True}}
+        if not ada:
+            baru["segments"] = [*segs, {"type": "crossing"}]
+        return baru, True
 
     def _get_crossing_overlay(self, start_block: str) -> Optional[bytes]:
         """Return pre-rendered PDF bytes for the crossing block of start_block.

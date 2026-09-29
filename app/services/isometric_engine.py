@@ -38,6 +38,9 @@ VARIANT_START_INSERT = {
 # sampai y≈44, detail kompor tengah-bawah sampai y≈88 → kotak bebas di atasnya.
 AUTO_FIT_AREA_DEFAULT = {
     "SK": (15.0, 92.0, 345.0, 285.0),
+    # SR_POLOS.dxf: kotak berpusat sama dengan posisi template baku SR
+    # (start-BR default) — region yang belum mengatur area tidak berubah.
+    "SR": (145.0, 88.0, 256.0, 209.0),
 }
 AUTO_FIT_PADDING = 4.0          # jarak aman dari tepi area (unit DXF = mm kertas)
 AUTO_FIT_MIN_VISUAL_MM = 1000.0  # pipa tidak dipendekkan di bawah ini (breakline)
