@@ -46,8 +46,14 @@ jobs:
           script: |
             cd /home/deploy/apps/dxf-generator
 
-            # Pull latest code (running as deploy user via SSH)
-            git pull origin main
+            # Pull latest code (running as deploy user via SSH).
+            # --ff-only: server harus selalu sama dengan GitHub. Kalau ada
+            # commit langsung di server (riwayat bercabang), deploy berhenti
+            # dengan pesan jelas alih-alih membuat merge commit diam-diam.
+            set -e
+            git fetch origin main
+            git merge --ff-only origin/main
+            set +e
 
             # Install/update dependencies (venv owned by deploy)
             source venv/bin/activate
