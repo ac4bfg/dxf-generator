@@ -331,6 +331,7 @@ class IsometricService:
             request.get("start_block", "start-BR"),
             request.get("segments", []),
             request.get("combined_dims", []),
+            request.get("auto_fit"),
         )
 
         # Resolve customer text replacements (always — placeholders need

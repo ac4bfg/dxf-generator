@@ -33,6 +33,17 @@ VARIANT_START_INSERT = {
     "sk": (150.0, 150.0),
 }
 
+# Auto-fit (request.auto_fit) — area gambar default di modelspace template.
+# SK_POLOS.dxf (A3 420x297): kolom kop mulai x=350, tabel BOM kiri-bawah
+# sampai y≈44, detail kompor tengah-bawah sampai y≈88 → kotak bebas di atasnya.
+AUTO_FIT_AREA_DEFAULT = {
+    "SK": (15.0, 92.0, 345.0, 285.0),
+}
+AUTO_FIT_PADDING = 4.0          # jarak aman dari tepi area (unit DXF = mm kertas)
+AUTO_FIT_MIN_VISUAL_MM = 1000.0  # pipa tidak dipendekkan di bawah ini (breakline)
+AUTO_FIT_MIN_SCALE = 0.5         # batas perkecil gambar kalau breakline tidak cukup
+AUTO_FIT_MAX_PASS = 12
+
 # Block crossing per start variant — ditampilkan saat casing > 0
 CROSSING_BLOCK_MAP = {
     "start-BR": "crossing-BR",
@@ -493,6 +504,93 @@ class IsometricEngine:
         self.template_path = Path(template_path)
         if not self.template_path.exists():
             raise FileNotFoundError(f"Template not found: {template_path}")
+        self._template_handles: Optional[set] = None
+
+    def _handles_template(self) -> set:
+        """Handle entity modelspace bawaan template — sisanya = hasil gambar."""
+        if self._template_handles is None:
+            tpl = ezdxf.readfile(str(self.template_path))
+            self._template_handles = {e.dxf.handle for e in tpl.modelspace()}
+        return self._template_handles
+
+    def _generate_auto_fit(self, request: Dict[str, Any], output_path: Optional[str],
+                           auto_fit: Dict[str, Any]):
+        """Letakkan gambar di tengah area yang ditentukan, muat tanpa keluar batas.
+
+        Urutan: (1) gambar apa adanya; kalau muat → geser ke tengah area.
+        (2) Tidak muat → pipa terpanjang dipendekkan visualnya (breakline
+        straight, dimensi tetap panjang asli) bertahap sampai muat, minimal
+        AUTO_FIT_MIN_VISUAL_MM. (3) Masih tidak muat → seluruh gambar
+        diperkecil seragam (minimal AUTO_FIT_MIN_SCALE), lalu ke tengah.
+        Breakline hanya dipakai saat gambar keseluruhan melebihi area.
+        """
+        import copy
+        from ezdxf import bbox
+        from ezdxf.math import Matrix44
+
+        module = request.get("module", "SR")
+        area = auto_fit.get("area") or AUTO_FIT_AREA_DEFAULT.get(module)
+        if not area:
+            req = {**request, "_auto_fit_pass": True}
+            return self.generate(req, output_path)
+        pad = float(auto_fit.get("padding", AUTO_FIT_PADDING))
+        ax1, ay1, ax2, ay2 = (float(v) for v in area)
+        ax1, ay1, ax2, ay2 = ax1 + pad, ay1 + pad, ax2 - pad, ay2 - pad
+        area_w, area_h = ax2 - ax1, ay2 - ay1
+        min_visual = float(auto_fit.get("min_visual_mm", AUTO_FIT_MIN_VISUAL_MM))
+        min_scale = float(auto_fit.get("min_scale", AUTO_FIT_MIN_SCALE))
+
+        req = copy.deepcopy(request)
+        req["_auto_fit_pass"] = True
+        req.pop("auto_fit", None)
+        template_handles = self._handles_template()
+
+        def visual_mm(seg):
+            bl = seg.get("breakline") or None
+            return float(bl.get("visual_length_mm")) if bl else float(seg.get("length_mm") or 0)
+
+        doc = ents = ext = None
+        over = 1.0
+        for _ in range(AUTO_FIT_MAX_PASS):
+            ok, msg, doc = self.generate(req, None)
+            if not ok:
+                return ok, msg, None
+            ents = [e for e in doc.modelspace() if e.dxf.handle not in template_handles]
+            ext = bbox.extents(ents)
+            if not ext.has_data:
+                break
+            over = max(ext.size.x / area_w, ext.size.y / area_h)
+            if over <= 1.0:
+                break
+            pipes = [s for s in req["segments"] if s.get("type", "pipe") == "pipe" and s.get("length_mm")]
+            terpanjang = max((visual_mm(s) for s in pipes), default=0.0)
+            if terpanjang <= min_visual:
+                break
+            # Batas baru untuk semua pipa panjang — sedikit di bawah rasio
+            # kelebihan supaya konvergen dalam beberapa putaran.
+            batas = max(min_visual, terpanjang / over * 0.95)
+            for s in pipes:
+                if visual_mm(s) > batas:
+                    real = float((s.get("breakline") or {}).get("real_length_mm") or s["length_mm"])
+                    s["breakline"] = {"style": "straight", "real_length_mm": real, "visual_length_mm": batas}
+
+        if ext is not None and ext.has_data:
+            cx, cy = (ext.extmin.x + ext.extmax.x) / 2, (ext.extmin.y + ext.extmax.y) / 2
+            m = Matrix44.translate(-cx, -cy, 0)
+            if over > 1.0:
+                s = max(min_scale, 1.0 / over)
+                m = m @ Matrix44.scale(s, s, s)
+            m = m @ Matrix44.translate((ax1 + ax2) / 2, (ay1 + ay2) / 2, 0)
+            for e in ents:
+                try:
+                    e.transform(m)
+                except (NotImplementedError, AttributeError) as err:
+                    warnings.warn(f"auto_fit: {e.dxftype()} tidak bisa ditransformasi: {err}")
+
+        if output_path:
+            doc.saveas(output_path)
+            return True, "Generated successfully", output_path
+        return True, "Generated in-memory", doc
 
     def _resolve_pipe_angle(self, seg: Dict, start_block: str, start_rotation: float) -> float:
         dir_by_variant = seg.get("direction_by_variant") or {}
@@ -771,6 +869,10 @@ class IsometricEngine:
 
     def generate(self, request: Dict[str, Any], output_path: str) -> Tuple[bool, str, Optional[str]]:
         """Generate DXF from request dict. Returns (success, message, output_file_path)."""
+        auto_fit = request.get("auto_fit")
+        # {} = aktif dengan area default — jangan diuji truthy.
+        if auto_fit is not None and not request.get("_auto_fit_pass"):
+            return self._generate_auto_fit(request, output_path, auto_fit)
         try:
             module = request.get("module", "SR")
             start_block = request.get("start_block", "start-BR")

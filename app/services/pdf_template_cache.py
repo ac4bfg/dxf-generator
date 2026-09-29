@@ -89,7 +89,8 @@ def _normalize_nums(v: Any) -> Any:
 
 
 def request_cache_key(template_path: Path, start_block: str,
-                      segments: List[Dict], combined_dims: List[Dict]) -> str:
+                      segments: List[Dict], combined_dims: List[Dict],
+                      auto_fit: Optional[Dict] = None) -> str:
     """Stable cache key for a (template, render-signature) tuple. The key
     captures only fields that actually affect the rendered geometry, so two
     customers whose segments differ only in cosmetically-irrelevant fields
@@ -113,6 +114,9 @@ def request_cache_key(template_path: Path, start_block: str,
         ],
         "combined_dims": [_combined_dim_signature(c) for c in (combined_dims or [])],
     }
+    # auto_fit memindah/memendekkan geometri → skeleton beda dari tanpa auto_fit.
+    if auto_fit is not None:
+        payload["auto_fit"] = auto_fit
     digest = hashlib.sha256(
         json.dumps(_normalize_nums(payload), sort_keys=True, default=str).encode()
     ).hexdigest()[:16]

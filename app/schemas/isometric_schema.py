@@ -177,6 +177,13 @@ class IsometricGenerateRequest(BaseModel):
     start_rotation: float = 0
     segments: List[Segment] = Field(..., min_length=1)
     combined_dims: List[CombinedDim] = []
+    auto_fit: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Letakkan gambar di tengah area & muatkan (breakline pipa "
+                    "terpanjang lalu perkecil bila perlu). {} = area default "
+                    "template modul; opsional area [x1,y1,x2,y2], padding, "
+                    "min_visual_mm, min_scale. start_insert diabaikan.",
+    )
     output_format: Literal["dxf", "dwg", "pdf"] = "dwg"
     file_name: Optional[str] = Field(None, description="Output filename (without extension)")
     customer_data: Optional[Dict[str, Any]] = Field(None, description="Customer data for text replacement in template")
@@ -231,6 +238,7 @@ class BulkPdfItem(BaseModel):
     start_rotation: float = 0
     segments: List[Segment] = Field(..., min_length=1)
     combined_dims: List[CombinedDim] = []
+    auto_fit: Optional[Dict[str, Any]] = None
     customer_data: Optional[Dict[str, Any]] = None
 
     class Config:

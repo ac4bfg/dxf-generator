@@ -1210,6 +1210,7 @@ async def warm_pdf_cache(payload: dict = Body(...), x_api_key: Optional[str] = H
                     item.get("start_block", "start-BR"),
                     item.get("segments", []),
                     item.get("combined_dims", []),
+                    item.get("auto_fit"),
                 )
                 if load_cache(cache_dir, key) is not None:
                     already += 1
