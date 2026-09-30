@@ -1328,6 +1328,10 @@ async def svg_lapisan_teks(payload: dict = Body(...), x_api_key: Optional[str] =
         with tempfile.TemporaryDirectory() as tmp_dir:
             svg = await asyncio.to_thread(_render, tmp_dir)
     except Exception as e:
+        from app.services.svg_lapisan import DiLuarKop
+        if isinstance(e, DiLuarKop):
+            # Editor kembali ke preview satu lapis untuk isi ini.
+            raise HTTPException(status_code=409, detail=str(e))
         raise HTTPException(status_code=500, detail=f"Lapisan teks gagal: {e}")
     return Response(content=svg, media_type="image/svg+xml")
 
@@ -1354,6 +1358,10 @@ async def svg_lapisan_gambar(payload: dict = Body(...), x_api_key: Optional[str]
     try:
         svg = await asyncio.to_thread(_render)
     except Exception as e:
+        from app.services.svg_lapisan import DiLuarKop
+        if isinstance(e, DiLuarKop):
+            # Editor kembali ke preview satu lapis untuk isi ini.
+            raise HTTPException(status_code=409, detail=str(e))
         raise HTTPException(status_code=500, detail=f"Lapisan gambar gagal: {e}")
     return Response(content=svg, media_type="image/svg+xml")
 

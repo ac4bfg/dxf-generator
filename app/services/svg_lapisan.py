@@ -40,6 +40,10 @@ PAPER_H = d2s.PAPER_HEIGHT_MM
 VERSI_LAPISAN = "3"
 
 
+class DiLuarKop(Exception):
+    """Isi lapisan melewati batas kop — pemanggil memakai preview satu lapis."""
+
+
 def _adalah_placeholder(e) -> bool:
     t = e.dxftype()
     if t == "TEXT":
@@ -229,6 +233,13 @@ class KopSvg:
         # membuat ACI 7 dianggap di atas latar terang → garis jadi hitam.
         # <rect> latarnya dibuang supaya lapisan transparan di atas kop.
         backend = self._rekam(lambda e: e.dxf.handle in handles, BackgroundPolicy.DEFAULT)
+        # Isi keluar dari batas kop → preview satu lapis memperkecil SELURUH
+        # halaman (kop ikut mengecil), lapisan tidak bisa meniru itu.
+        bbox = backend.player().bbox()
+        rb, tol = self.render_box, 1e-6
+        if bbox.has_data and (bbox.extmin.x < rb.extmin.x - tol or bbox.extmin.y < rb.extmin.y - tol
+                              or bbox.extmax.x > rb.extmax.x + tol or bbox.extmax.y > rb.extmax.y + tol):
+            raise DiLuarKop(f"lapisan {awalan} keluar dari batas kop")
         return self._jadi_svg(backend, awalan, buang_latar=True)
 
     # ------------------------------------------------------------------
