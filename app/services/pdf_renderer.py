@@ -838,6 +838,101 @@ def render_doc_to_pdf_bytes(doc,
     return pdf_bytes
 
 
+def _rekam_lapisan(doc, target, paperspace, filter_func,
+                   background_policy: BackgroundPolicy):
+    """Rekam (belum ke PDF) entity yang lolos filter_func ke backend baru."""
+    ctx = RenderContext(doc)
+    if paperspace is not None:
+        ctx.set_current_layout(paperspace)
+    cfg = Configuration(
+        background_policy=background_policy,
+        color_policy=ColorPolicy.COLOR if PRESERVE_COLOR else ColorPolicy.BLACK,
+        lineweight_policy=LineweightPolicy.ABSOLUTE,
+        lineweight_scaling=LINEWEIGHT_SCALING,
+        min_lineweight=MIN_LINEWEIGHT,
+    )
+    backend = pymupdf.PyMuPdfBackend()
+    Frontend(ctx, backend, config=cfg).draw_layout(
+        target, finalize=True, filter_func=filter_func
+    )
+    return backend
+
+
+def render_kop_gambar_pdf_bytes(doc,
+                                *,
+                                font_dir: Path,
+                                kop_filter,
+                                gambar_filter,
+                                kop_cache: Optional[tuple] = None,
+                                layout_name: str = "SR") -> Optional[tuple]:
+    """Render kop & gambar sebagai dua lapisan PDF lalu tumpuk.
+
+    Kop (bingkai/tabel/teks/logo) ±15 dtk di server kecil, gambar ±0,5 dtk.
+    Kop cukup dirender sekali per berkas kop (``kop_cache`` = hasil panggilan
+    sebelumnya), gambar dirender per request. Kedua lapisan memakai
+    ``render_box`` = bbox kop supaya skala & posisinya identik dengan render
+    penuh satu lapis.
+
+    Return ``(pdf_gabungan, (kop_pdf, kop_bbox))`` — atau ``None`` kalau
+    gambar keluar dari bbox kop (skala render penuh akan berbeda; pemanggil
+    kembali ke render satu lapis).
+    """
+    from ezdxf.math import BoundingBox2d
+    import pymupdf as _pm
+
+    _prepare_doc(doc, font_dir)
+    from app.services.dxf_to_svg import fix_mtext_for_ezdxf_render
+    fix_mtext_for_ezdxf_render(doc)
+    target, paperspace = _select_render_layout(doc, layout_name)
+    if paperspace is not None:
+        page = layout.Page.from_dxf_layout(paperspace)
+    else:
+        page = layout.Page(420, 297, layout.Units.mm,
+                           margins=layout.Margins.all(0))
+    settings = layout.Settings(fit_page=True, scale=1)
+
+    if kop_cache is None:
+        kop_backend = _rekam_lapisan(doc, target, paperspace, kop_filter,
+                                     BackgroundPolicy.WHITE)
+        bbox_kop = kop_backend.player().bbox()
+        if not bbox_kop.has_data:
+            return None
+        kop_bbox = (bbox_kop.extmin.x, bbox_kop.extmin.y,
+                    bbox_kop.extmax.x, bbox_kop.extmax.y)
+        kop_pdf = kop_backend.get_pdf_bytes(page, settings=settings,
+                                            render_box=bbox_kop)
+    else:
+        kop_pdf, kop_bbox = kop_cache
+        bbox_kop = BoundingBox2d([kop_bbox[:2], kop_bbox[2:]])
+
+    # Latar OFF: lapisan gambar transparan, kop di bawahnya tetap terlihat.
+    gambar_backend = _rekam_lapisan(doc, target, paperspace, gambar_filter,
+                                    BackgroundPolicy.OFF)
+    bbox_gambar = gambar_backend.player().bbox()
+    toleransi = 1e-6
+    if bbox_gambar.has_data and (
+            bbox_gambar.extmin.x < bbox_kop.extmin.x - toleransi
+            or bbox_gambar.extmin.y < bbox_kop.extmin.y - toleransi
+            or bbox_gambar.extmax.x > bbox_kop.extmax.x + toleransi
+            or bbox_gambar.extmax.y > bbox_kop.extmax.y + toleransi):
+        return None
+
+    hasil = _pm.open(stream=kop_pdf, filetype="pdf")
+    try:
+        if bbox_gambar.has_data:
+            gambar_pdf = gambar_backend.get_pdf_bytes(page, settings=settings,
+                                                      render_box=bbox_kop)
+            lapisan = _pm.open(stream=gambar_pdf, filetype="pdf")
+            try:
+                hasil[0].show_pdf_page(hasil[0].rect, lapisan, 0)
+            finally:
+                lapisan.close()
+        gabungan = hasil.tobytes(garbage=3, deflate=True)
+    finally:
+        hasil.close()
+    return gabungan, (kop_pdf, kop_bbox)
+
+
 def get_page_height_mm(doc, layout_name: str = "SR") -> float:
     """Return the rendering page height in mm, matching what
     `render_doc_to_pdf_bytes` uses. Needed by the skeleton-cache overlay so

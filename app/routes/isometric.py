@@ -102,6 +102,8 @@ def get_isometric_service(module: str = "SR", project_id: Optional[int] = None) 
         thumbnails_dir=thumbnails,
         oda_path=settings.oda_path,
         dwg_version=settings.dwg_version,
+        # Kop region (_p<id>): simbol gambar tetap dari kop standar.
+        blok_standar_path=template if str(template_path) != str(template) else None,
     )
 
 
@@ -1227,6 +1229,191 @@ async def warm_pdf_cache(payload: dict = Body(...), x_api_key: Optional[str] = H
 
     built, already, failed, errors = await asyncio.to_thread(_warm)
     return {"total": len(payloads), "built": built, "already_cached": already, "failed": failed, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Preview SVG berlapis (kop / teks pelanggan / gambar) — lihat svg_lapisan.py
+# ---------------------------------------------------------------------------
+
+def _kop_svg(service: IsometricService):
+    from app.services import svg_lapisan
+    from app.services.isometric_engine import IsometricEngine
+    return svg_lapisan.ambil_kop(
+        service.template_path, service._pdf_font_dir(),
+        service.engine.blok_standar_path, IsometricEngine,
+    )
+
+
+def _logo_tags_lapisan(kop, logo_overlays_in: list, tmp_dir: str) -> str:
+    """Logo/peta region → <image> (mm kertas), posisi sama dengan preview-svg."""
+    import base64
+    from app.services.dxf_to_svg import _build_logo_image_tags, PAPER_HEIGHT_MM
+    from app.services.pdf_renderer import collect_ole_frames
+    from html import escape
+    frames_by_idx = None
+    overlays = []
+    tag_href = []
+    for ov in logo_overlays_in or []:
+        b64 = ov.get("png_base64")
+        href = ov.get("href")
+        if not b64 and not href:
+            continue
+        if all(k in ov for k in ("x1", "y1", "x2", "y2")):
+            pos = ov
+        else:
+            if frames_by_idx is None:
+                frames_by_idx = {f["idx"]: f for f in collect_ole_frames(kop.doc)}
+            pos = frames_by_idx.get(ov.get("idx"))
+            if not pos:
+                continue
+        if href:
+            # PNG disajikan Laravel sebagai URL ber-cache (bukan base64 di
+            # dalam SVG) — posisi sama persis dengan _build_logo_image_tags.
+            x1, x2, y1, y2 = float(pos["x1"]), float(pos["x2"]), float(pos["y1"]), float(pos["y2"])
+            w, h = abs(x2 - x1), abs(y2 - y1)
+            if w > 0 and h > 0:
+                tag_href.append(
+                    f'<image x="{min(x1, x2):.3f}" y="{PAPER_HEIGHT_MM - max(y1, y2):.3f}" '
+                    f'width="{w:.3f}" height="{h:.3f}" preserveAspectRatio="none" '
+                    f'href="{escape(str(href), quote=True)}" />'
+                )
+            continue
+        try:
+            png = base64.b64decode(b64)
+        except Exception:
+            continue
+        png_path = Path(tmp_dir) / f"logo_{ov.get('idx', 0)}.png"
+        png_path.write_bytes(png)
+        overlays.append({"png_path": str(png_path),
+                         "x1": pos["x1"], "y1": pos["y1"], "x2": pos["x2"], "y2": pos["y2"]})
+    return _build_logo_image_tags(overlays, PAPER_HEIGHT_MM) + "".join(tag_href)
+
+
+@router.post("/svg-lapisan/kop")
+async def svg_lapisan_kop(payload: dict = Body(...), x_api_key: Optional[str] = Header(None),
+                          if_none_match: Optional[str] = Header(None)):
+    """Lapisan kop dasar (tanpa teks pelanggan, tanpa logo). Sama untuk
+    semua pelanggan satu region → ETag supaya browser/Laravel cukup
+    mengunduh sekali. Body: {module, project_id}"""
+    verify_api_key(x_api_key)
+    service = get_isometric_service(module=payload.get("module", "SR"),
+                                    project_id=payload.get("project_id"))
+    kop = await asyncio.to_thread(_kop_svg, service)
+    from app.services.svg_lapisan import kunci_kop
+    etag = '"' + kunci_kop(service.template_path, service.engine.blok_standar_path) + '"'
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(content=kop.svg_kop, media_type="image/svg+xml", headers={"ETag": etag})
+
+
+@router.post("/svg-lapisan/teks")
+async def svg_lapisan_teks(payload: dict = Body(...), x_api_key: Optional[str] = Header(None)):
+    """Lapisan teks pelanggan + logo/peta. Body: {module, project_id,
+    customer_data?, logo_overlays?}"""
+    verify_api_key(x_api_key)
+    service = get_isometric_service(module=payload.get("module", "SR"),
+                                    project_id=payload.get("project_id"))
+    settings = get_settings()
+    dxf_svc = DxfService(template_path=str(service.template_path), output_path=settings.output_path,
+                         oda_path=settings.oda_path, dwg_version=settings.dwg_version)
+    replacements = dxf_svc.prepare_data(payload.get("customer_data") or {})
+
+    def _render(tmp_dir: str):
+        kop = _kop_svg(service)
+        logo_tags = _logo_tags_lapisan(kop, payload.get("logo_overlays"), tmp_dir)
+        with kop.lock:
+            return kop.lapisan_teks(replacements, logo_tags)
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            svg = await asyncio.to_thread(_render, tmp_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lapisan teks gagal: {e}")
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@router.post("/svg-lapisan/gambar")
+async def svg_lapisan_gambar(payload: dict = Body(...), x_api_key: Optional[str] = Header(None)):
+    """Lapisan gambar saja (pipa, simbol, dimensi, crossing). Body sama
+    dengan preview-drawing-svg (tanpa logo_overlays)."""
+    verify_api_key(x_api_key)
+    module = payload.get("module", "SR")
+    project_id = payload.pop("project_id", None)
+    customer_data = payload.pop("customer_data", None)
+    payload.pop("logo_overlays", None)
+    service = get_isometric_service(module=module, project_id=project_id)
+
+    def _render():
+        kop = _kop_svg(service)
+        req, _ = service.siapkan_crossing_auto_fit(payload, customer_data)
+        if customer_data is not None:
+            req = {**req, "customer_data": customer_data}
+        with kop.lock:
+            return kop.lapisan_gambar(service.engine, req)
+
+    try:
+        svg = await asyncio.to_thread(_render)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lapisan gambar gagal: {e}")
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+def panaskan_svg_lapisan_semua() -> dict:
+    """Bangun lapisan kop SVG untuk kop default + semua kop region yang ada
+    di disk. Dipanggil di latar belakang saat server start."""
+    import re as _re
+    settings = get_settings()
+    hasil: dict = {}
+    for module in ("SR", "SK"):
+        base = (getattr(settings, "sk_isometric_template_path", None) or "templates/SK_POLOS.dxf"
+                if module == "SK"
+                else getattr(settings, "isometric_template_path", None) or settings.template_path)
+        base_path = Path(base)
+        project_ids = [None]
+        if base_path.parent.is_dir():
+            pola = _re.compile(_re.escape(base_path.stem) + r"_p(\d+)" + _re.escape(base_path.suffix) + "$")
+            project_ids += [int(m.group(1)) for f in base_path.parent.iterdir() if (m := pola.match(f.name))]
+        for pid in project_ids:
+            label = f"{module} p{pid}"
+            try:
+                _kop_svg(get_isometric_service(module=module, project_id=pid))
+                hasil[label] = "siap"
+            except Exception as exc:
+                hasil[label] = f"gagal: {exc}"
+    return hasil
+
+
+_KOP_SEDANG_DIPANASKAN: set = set()
+
+
+@router.post("/kop-cache/warm")
+async def warm_kop_cache(background_tasks: BackgroundTasks,
+                         payload: dict = Body(...), x_api_key: Optional[str] = Header(None)):
+    """Render lapisan kop ke cache di latar belakang. Dipanggil Laravel
+    begitu kop As Built diunggah. Body: {module, project_id}"""
+    verify_api_key(x_api_key)
+    module = payload.get("module", "SR")
+    project_id = payload.get("project_id")
+    kunci = (module, project_id)
+    if kunci in _KOP_SEDANG_DIPANASKAN:
+        return {"scheduled": False, "reason": "sedang berjalan"}
+    service = get_isometric_service(module=module, project_id=project_id)
+    _KOP_SEDANG_DIPANASKAN.add(kunci)
+
+    def _panaskan():
+        try:
+            hasil = service.panaskan_lapisan_kop(module)
+            _kop_svg(service)
+            hasil["svg"] = "siap"
+            print(f"[KOP-CACHE] {module} p{project_id}: {hasil}")
+        except Exception as exc:
+            print(f"[KOP-CACHE] {module} p{project_id} gagal: {exc}")
+        finally:
+            _KOP_SEDANG_DIPANASKAN.discard(kunci)
+
+    background_tasks.add_task(asyncio.to_thread, _panaskan)
+    return {"scheduled": True, "module": module, "project_id": project_id,
+            "template": service.template_path.name}
 
 
 @router.post("/pdf-cache/clear")

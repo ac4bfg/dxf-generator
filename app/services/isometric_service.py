@@ -133,14 +133,15 @@ class IsometricService:
     def __init__(self, template_path: str, output_dir: str,
                  thumbnails_dir: Optional[str] = None,
                  oda_path: Optional[str] = None,
-                 dwg_version: str = "ACAD2018"):
+                 dwg_version: str = "ACAD2018",
+                 blok_standar_path: Optional[str] = None):
         self.template_path = Path(template_path)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.thumbnails_dir = Path(thumbnails_dir) if thumbnails_dir else None
         self.oda_path = oda_path
         self.dwg_version = dwg_version
-        self.engine = IsometricEngine(str(self.template_path))
+        self.engine = IsometricEngine(str(self.template_path), blok_standar_path=blok_standar_path)
 
     def generate(self, request: Dict[str, Any]) -> Tuple[bool, str, Optional[Path]]:
         fmt = request.get("output_format", "dxf").lower()
@@ -409,12 +410,23 @@ class IsometricService:
         # compose_customer_pdf() di bawah — mekanisme itu sudah region-aware
         # dan TIDAK ikut ter-cache ke skeleton (diterapkan per-request).
         from app.services.pdf_template_cache import _skip_placeholders, _skip_placeholders_and_crossing
-        skeleton_bytes = render_doc_to_pdf_bytes(
-            doc,
-            font_dir=self._pdf_font_dir(),
-            # Crossing yang di-bake (auto_fit) tetap dirender di skeleton.
-            filter_func=_skip_placeholders if crossing_dibake else _skip_placeholders_and_crossing,
-        )
+        # Crossing yang di-bake (auto_fit) tetap dirender di skeleton.
+        filter_dasar = _skip_placeholders if crossing_dibake else _skip_placeholders_and_crossing
+        skeleton_bytes = self._render_skeleton_berlapis(doc, filter_dasar, crossing_dibake, cache_dir)
+        if skeleton_bytes is None:
+            # Doc sudah dimutasi render berlapis (monokrom, koreksi MTEXT) —
+            # bangun ulang supaya koreksi tidak teraplikasi dua kali.
+            success, msg, doc = self.engine.generate(request, None)
+            if not success:
+                raise RuntimeError(f"engine.generate failed: {msg}")
+            self._fix_image_paths(doc)
+            if crossing_dibake:
+                self._fix_crossing_mtext_direction(doc, start_block)
+            skeleton_bytes = render_doc_to_pdf_bytes(
+                doc,
+                font_dir=self._pdf_font_dir(),
+                filter_func=filter_dasar,
+            )
         save_cache(cache_dir, key, skeleton_bytes, placeholders)
         self._cache_page_height(template_path, page_h_mm)
 
@@ -469,6 +481,80 @@ class IsometricService:
             return configured
         fallback = Path("testing/logo")
         return fallback if fallback.is_dir() else None
+
+    def _render_skeleton_berlapis(self, doc, filter_dasar, crossing_dibake: bool,
+                                  cache_dir: Path) -> Optional[bytes]:
+        """Skeleton = lapisan kop (cache per berkas kop) + lapisan gambar.
+
+        Render kop ±15 dtk di server kecil, gambar ±0,5 dtk — dulu keduanya
+        dirender ulang untuk setiap bentuk gambar baru. Return None (pemanggil
+        render satu lapis seperti dulu) kalau gagal atau gambar keluar dari
+        batas kop.
+        """
+        from app.services.pdf_template_cache import (
+            handles_kop, kop_cache_key, load_cache, save_cache,
+        )
+        from app.services.pdf_renderer import render_kop_gambar_pdf_bytes
+        try:
+            handles = handles_kop(self.template_path)
+            kunci_kop = kop_cache_key(self.template_path,
+                                      self.engine.blok_standar_path, crossing_dibake)
+            tersimpan = load_cache(cache_dir, kunci_kop)
+            kop_cache = (tersimpan[0], tuple(tersimpan[1])) if tersimpan else None
+            hasil = render_kop_gambar_pdf_bytes(
+                doc,
+                font_dir=self._pdf_font_dir(),
+                kop_filter=lambda e: e.dxf.handle in handles and filter_dasar(e),
+                gambar_filter=lambda e: e.dxf.handle not in handles and filter_dasar(e),
+                kop_cache=kop_cache,
+            )
+            if hasil is None:
+                return None
+            skeleton_bytes, (kop_pdf, kop_bbox) = hasil
+            if kop_cache is None:
+                save_cache(cache_dir, kunci_kop, kop_pdf, list(kop_bbox))
+            return skeleton_bytes
+        except Exception as exc:
+            print(f"[WARNING] Skeleton berlapis gagal, render satu lapis: {exc}")
+            return None
+
+    def panaskan_lapisan_kop(self, module: str) -> Dict[str, str]:
+        """Render lapisan kop ke cache sekarang (dipanggil saat kop diunggah),
+        supaya preview/PDF pertama sesudahnya tidak menunggu ±15 dtk.
+
+        SR punya dua varian kunci kop: crossing di-bake (auto_fit + casing)
+        dan tidak. Gambar pemicu cuma satu pipa pendek — isinya tidak
+        memengaruhi lapisan kop.
+        """
+        from app.services.pdf_template_cache import (
+            _skip_placeholders, _skip_placeholders_and_crossing,
+            kop_cache_key, load_cache,
+        )
+        cache_dir = self.output_dir / "pdf_cache"
+        hasil: Dict[str, str] = {}
+        for dibake in ([False, True] if module == "SR" else [False]):
+            label = "crossing" if dibake else "biasa"
+            kunci = kop_cache_key(self.template_path, self.engine.blok_standar_path, dibake)
+            if load_cache(cache_dir, kunci) is not None:
+                hasil[label] = "sudah ada"
+                continue
+            segments = [{"type": "pipe", "direction": "right", "length_mm": 100}]
+            if dibake:
+                segments.append({"type": "crossing"})
+            request = {"module": module, "segments": segments}
+            if dibake:
+                request["auto_fit"] = {"mode": "auto", "crossing": True}
+            success, msg, doc = self.engine.generate(request, None)
+            if not success:
+                hasil[label] = f"gagal: {msg}"
+                continue
+            self._fix_image_paths(doc)
+            if dibake:
+                self._fix_crossing_mtext_direction(doc, request.get("start_block", "start-BR"))
+            filter_dasar = _skip_placeholders if dibake else _skip_placeholders_and_crossing
+            ok = self._render_skeleton_berlapis(doc, filter_dasar, dibake, cache_dir)
+            hasil[label] = "dibuat" if ok is not None else "gagal"
+        return hasil
 
     def _fix_crossing_mtext_direction(self, doc, start_block: str) -> None:
         """Prepare crossing block MTEXT for ezdxf PDF rendering.

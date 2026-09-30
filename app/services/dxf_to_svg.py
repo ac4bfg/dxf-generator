@@ -204,7 +204,7 @@ def _resolve_default_paragraph_align(doc) -> None:
             entity.text = _PARA_DEFAULT_RE.sub(lambda _m: chr(92) + 'pxq' + q + ';', entity.text)
 
 
-def fix_mtext_for_ezdxf_render(doc) -> None:
+def fix_mtext_for_ezdxf_render(doc, lewati=None) -> None:
     """Normalize MTEXT MiddleCenter entities so ezdxf renders them correctly.
 
     ezdxf SVG/PDF renderer treats MTEXT attachment_point=5 (MiddleCenter) as
@@ -219,6 +219,10 @@ def fix_mtext_for_ezdxf_render(doc) -> None:
 
     Call ONLY on a doc used exclusively for rendering (never for DXF/DWG
     saving), because it mutates the entities in place.
+
+    lewati — handle MTEXT modelspace yang tidak dikoreksi sekarang (teks
+    placeholder: lebarnya baru diketahui setelah diganti data pelanggan,
+    lihat svg_lapisan.py).
     """
     # Fix DIMENSION text miring: angka ukur DWG manual disimpan sebagai
     # MTEXT "\A1;<value>" di dalam blok geometri anonim (*D..). Prefix "\A1;"
@@ -229,6 +233,8 @@ def fix_mtext_for_ezdxf_render(doc) -> None:
     _resolve_default_paragraph_align(doc)
 
     for entity in doc.modelspace().query('MTEXT'):
+        if lewati and entity.dxf.handle in lewati:
+            continue
         _fix_middlecenter_mtext(entity, doc)
 
     # Koreksi posisi MiddleCenter untuk MTEXT dimensi di blok *D (angka DWG

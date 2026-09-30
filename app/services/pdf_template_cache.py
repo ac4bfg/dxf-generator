@@ -912,3 +912,43 @@ def save_cache(cache_dir: Path, key: str, pdf_bytes: bytes,
     pdf_path, meta_path = _cache_paths(cache_dir, key)
     pdf_path.write_bytes(pdf_bytes)
     meta_path.write_text(json.dumps(placeholders, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Lapisan kop (render sekali per berkas kop, dipakai semua bentuk gambar)
+# ---------------------------------------------------------------------------
+
+# Handle entity modelspace bawaan kop, per (path, mtime) — sama alasan
+# dengan _TEMPLATE_CONTENT_HASH: kop yang diunggah ulang di path sama
+# terdeteksi dari mtime-nya.
+_HANDLES_KOP: Dict[tuple, frozenset] = {}
+
+# Naikkan kalau cara render lapisan kop berubah, supaya cache lama basi.
+_VERSI_LAPISAN_KOP = "1"
+
+
+def handles_kop(template_path: Path) -> frozenset:
+    """Handle entity modelspace berkas kop — sisanya di doc hasil
+    engine.generate adalah gambar (pipa, simbol, dimensi, crossing)."""
+    key = (str(template_path), template_path.stat().st_mtime_ns)
+    if key not in _HANDLES_KOP:
+        import ezdxf
+        tpl = ezdxf.readfile(str(template_path))
+        _HANDLES_KOP[key] = frozenset(e.dxf.handle for e in tpl.modelspace())
+    return _HANDLES_KOP[key]
+
+
+def kop_cache_key(template_path: Path, blok_standar_path: Optional[str],
+                  crossing_dibake: bool) -> str:
+    """Kunci cache lapisan kop: isi berkas kop + kop standar (sumber blok
+    simbol yang bisa dipakai kop) + filter crossing yang dipakai."""
+    std = Path(blok_standar_path) if blok_standar_path else None
+    payload = {
+        "v": _VERSI_LAPISAN_KOP,
+        "template": template_path.name,
+        "template_hash": _get_template_hash(template_path),
+        "standar_hash": _get_template_hash(std) if std and std.exists() else None,
+        "crossing_dibake": bool(crossing_dibake),
+    }
+    raw = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return "kop_" + hashlib.sha256(raw).hexdigest()[:24]

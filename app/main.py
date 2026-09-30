@@ -47,6 +47,18 @@ async def lifespan(_app: FastAPI):
                 break
     except Exception:
         pass  # non-fatal: fonts will be configured on first request as fallback
+
+    # Lapisan kop SVG (/drawing) dibangun di latar belakang — request pertama
+    # sesudah restart/deploy tidak menunggu ±2 dtk per kop.
+    def _panaskan_svg():
+        try:
+            from app.routes.isometric import panaskan_svg_lapisan_semua
+            print(f"[SVG-LAPISAN] panaskan saat start: {panaskan_svg_lapisan_semua()}")
+        except Exception as exc:
+            print(f"[SVG-LAPISAN] panaskan saat start gagal: {exc}")
+
+    import threading
+    threading.Thread(target=_panaskan_svg, daemon=True).start()
     yield  # server runs here
 
 

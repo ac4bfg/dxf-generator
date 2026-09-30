@@ -503,17 +503,72 @@ def explode_dimension(doc, msp, dim_entity):
 class IsometricEngine:
     """Core engine for dynamic isometric pipeline drawing."""
 
-    def __init__(self, template_path: str):
+    # Kop standar yang sudah dibaca (path::mtime -> Drawing) — sumber blok simbol.
+    _DOC_STANDAR: Dict[str, Any] = {}
+
+    def __init__(self, template_path: str, blok_standar_path: Optional[str] = None):
         self.template_path = Path(template_path)
         if not self.template_path.exists():
             raise FileNotFoundError(f"Template not found: {template_path}")
         self._template_handles: Optional[set] = None
+        # Kop region (hasil upload As Built) hanya menentukan bingkai/tabel/
+        # teks. Simbol gambar (komponen, start, crossing, panah dimensi)
+        # selalu diambil dari kop standar ini — kop region yang di-strip/
+        # explode ulang di AutoCAD sering membawa definisi blok rusak
+        # (mis. REGULATOR-2 bergeser ribuan mm dari base point-nya).
+        self.blok_standar_path = blok_standar_path
+        # Doc kop yang sudah dibaca, dipakai ulang oleh putaran auto_fit
+        # berikutnya (lihat _generate_auto_fit) — baca kop ±1 dtk per putaran.
+        self._doc_pakai_ulang = None
+
+    def _nama_blok_dipakai(self, request: Dict[str, Any], start_block: Optional[str]) -> set:
+        """Nama blok yang MUNGKIN disisipkan engine untuk request ini."""
+        nama = set(_DIM_ARROW_BLOCK_CANDIDATES) | {"_DotSmall"}
+        if start_block:
+            nama.add(start_block)
+        nama.update(CROSSING_BLOCK_MAP.values())
+        for seg in request.get("segments") or []:
+            if seg.get("block"):
+                nama.add(seg["block"])
+            nama.update((seg.get("block_by_variant") or {}).values())
+            for ov in seg.get("overlays") or []:
+                if ov.get("block"):
+                    nama.add(ov["block"])
+                nama.update((ov.get("block_by_variant") or {}).values())
+        for varian in list(nama):
+            nama.update(SMART_BLOCK_VARIANTS.get(varian, {}).values())
+        return nama
+
+    def _samakan_blok_standar(self, doc, nama: set) -> None:
+        """Ganti definisi blok simbol di kop region dengan versi kop standar."""
+        if not self.blok_standar_path:
+            return
+        std_path = Path(self.blok_standar_path)
+        if not std_path.exists() or std_path.resolve() == self.template_path.resolve():
+            return
+        kunci = f"{std_path.resolve()}::{std_path.stat().st_mtime_ns}"
+        std = IsometricEngine._DOC_STANDAR.get(kunci)
+        if std is None:
+            std = ezdxf.readfile(str(std_path))
+            IsometricEngine._DOC_STANDAR = {kunci: std}
+        target = [n for n in nama if n in std.blocks]
+        if not target:
+            return
+        from ezdxf.addons import Importer
+        for n in target:
+            if n in doc.blocks:
+                doc.blocks.delete_block(n, safe=False)
+        imp = Importer(std, doc)
+        for n in target:
+            imp.import_block(n, rename=False)
+        imp.finalize()
 
     def _handles_template(self) -> set:
         """Handle entity modelspace bawaan template — sisanya = hasil gambar."""
         if self._template_handles is None:
-            tpl = ezdxf.readfile(str(self.template_path))
-            self._template_handles = {e.dxf.handle for e in tpl.modelspace()}
+            # Cache per proses (path+mtime) — engine dibuat baru tiap request.
+            from app.services.pdf_template_cache import handles_kop
+            self._template_handles = handles_kop(self.template_path)
         return self._template_handles
 
     def _generate_auto_fit(self, request: Dict[str, Any], output_path: Optional[str],
@@ -555,7 +610,17 @@ class IsometricEngine:
         doc = ents = ext = None
         over = 1.0
         for _ in range(AUTO_FIT_MAX_PASS):
-            ok, msg, doc = self.generate(req, None)
+            if doc is not None:
+                # Putaran berikutnya: buang gambar putaran sebelumnya, kop
+                # yang sudah terbaca dipakai lagi (tidak baca ulang dari disk).
+                msp_lama = doc.modelspace()
+                for e in [e for e in msp_lama if e.dxf.handle not in template_handles]:
+                    msp_lama.delete_entity(e)
+                self._doc_pakai_ulang = doc
+            try:
+                ok, msg, doc = self.generate(req, None)
+            finally:
+                self._doc_pakai_ulang = None
             if not ok:
                 return ok, msg, None
             ents = [e for e in doc.modelspace() if e.dxf.handle not in template_handles]
@@ -723,8 +788,14 @@ class IsometricEngine:
         # _DIM_ARROW_BLOCK_CANDIDATES comment (name can vary per template).
         arrow_block = next(
             (name for name in _DIM_ARROW_BLOCK_CANDIDATES if name in doc.blocks),
-            DIM_OVERRIDES["dimblk1"],
+            None,
         )
+        if arrow_block is None:
+            # Kop hasil "strip" (purge) bisa kehilangan SEMUA blok panah —
+            # buat ulang blok standar _DOTSMALL supaya dimensi tetap bisa
+            # dirender (pdf_renderer sudah merapikan tampilan _dotsmall).
+            from ezdxf.render.arrows import ARROWS
+            arrow_block = ARROWS.create_block(doc.blocks, ARROWS.dot_small)
         dim_overrides = DIM_OVERRIDES
         if arrow_block != DIM_OVERRIDES["dimblk1"]:
             dim_overrides = {**DIM_OVERRIDES, "dimblk1": arrow_block, "dimblk2": arrow_block}
@@ -916,7 +987,11 @@ class IsometricEngine:
                     self._auto_dimension(**d)
                 pending_sk_dims.clear()
 
-            doc = ezdxf.readfile(str(self.template_path))
+            doc = self._doc_pakai_ulang
+            self._doc_pakai_ulang = None
+            if doc is None:
+                doc = ezdxf.readfile(str(self.template_path))
+                self._samakan_blok_standar(doc, self._nama_blok_dipakai(request, start_block))
             msp = doc.modelspace()
 
             if start_block and start_block not in doc.blocks:
