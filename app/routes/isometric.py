@@ -683,7 +683,7 @@ async def preview_drawing_pdf(
                 raise ValueError(msg)
             service._apply_text_replacement(doc, customer_data)
             pdf_bytes = service.render_pdf_bytes(doc)
-            need_crossing = not dibake and (service._customer_has_casing(customer_data) or any(
+            need_crossing = not dibake and (service._crossing_dari_casing(payload, customer_data) or any(
                 s.get("type") == "crossing" for s in payload.get("segments", [])
             ))
             if need_crossing:

@@ -369,7 +369,7 @@ class IsometricService:
         # Apply overlay when customer has casing OR segments had a crossing
         # type entry (custom drawing) — both cases use the same 4 cached bytes.
         start_block = request.get("start_block", "start-BR")
-        need_crossing = not crossing_dibake and (self._customer_has_casing(customer_data) or any(
+        need_crossing = not crossing_dibake and (self._crossing_dari_casing(request, customer_data) or any(
             s.get("type") == "crossing" for s in request.get("segments", [])
         ))
         crossing_bytes = self._get_crossing_overlay(start_block) if need_crossing else None
@@ -999,6 +999,15 @@ class IsometricService:
         except (ValueError, TypeError):
             return False
 
+    @classmethod
+    def _crossing_dari_casing(cls, request: Optional[Dict], customer_data: Optional[Dict]) -> bool:
+        """Crossing otomatis dari material casing — hanya rekomendasi.
+        Request ber-"tanpa_crossing" (admin sengaja menghapus segmen crossing
+        di editor) tidak lagi dipaksa digambar walau casing > 0."""
+        if (request or {}).get("tanpa_crossing"):
+            return False
+        return cls._customer_has_casing(customer_data)
+
     def siapkan_crossing_auto_fit(self, request: Dict[str, Any],
                                   customer_data: Optional[Dict]) -> Tuple[Dict[str, Any], bool]:
         """SR auto_fit + casing: blok crossing DIGAMBAR sebagai bagian gambar
@@ -1010,7 +1019,7 @@ class IsometricService:
             return request, False
         segs = request.get("segments") or []
         ada = any(s.get("type") == "crossing" for s in segs)
-        if not ada and not self._customer_has_casing(customer_data):
+        if not ada and not self._crossing_dari_casing(request, customer_data):
             return request, False
         baru = {**request, "auto_fit": {**(request.get("auto_fit") or {}), "crossing": True}}
         if not ada:
